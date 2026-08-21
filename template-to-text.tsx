@@ -78,7 +78,8 @@ interface ProductData {
   metafields: MetafieldData[];
   // A free-text note the merchant typed for this product INSIDE a selection. It is never written to
   // the product itself: it lives in memory for the current selection and inside a public selection's
-  // own metafield. Exposed to templates as {{ product.notes }} (alias: {{ products.notes }}).
+  // own metafield. Exposed to templates as {{ product.note }} (aliases: {{ product.notes }},
+  // {{ products.note }}, {{ products.notes }} -- 'note' is the canonical spelling as of session 7).
   note: string;
 }
 
@@ -95,8 +96,8 @@ interface ProductData {
 //    no selection.foreach -- despite "PER-PRODUCT" being the name used for it in the architecture
 //    docs, it has always produced one file per VARIANT row, not one per product).
 // Stored per template so file-splitting is an explicit, editable setting rather than inferred from
-// what happens to be in the body. See mapStoredTemplate for how an already-saved template (with no
-// stored fileBreak) is defaulted so its rendered output doesn't change the first time it's reopened.
+// what happens to be in the body. As of session 7, per explicit direction, an UNSET fileBreak is no
+// longer inferred from the body at all -- see mapStoredTemplate/TemplateData.fileBreak below.
 type FileBreak = 'selection' | 'object' | 'product' | 'note' | 'variant';
 
 interface TemplateData {
@@ -112,7 +113,13 @@ interface TemplateData {
   // most-recently-pinned first. Null whenever the template is unpinned, and also null for a
   // template that was pinned before this timestamp was recorded.
   pinnedAt: number | null;
-  fileBreak: FileBreak;
+  // `null` means "never explicitly chosen" -- a template saved before this field existed (session 4),
+  // or one saved since without ever touching the File break dropdown. As of session 7, per explicit
+  // direction ("this now must be user specified"), a null fileBreak is NEVER inferred from the body;
+  // it must be set in the editor before the template can be downloaded or previewed (see
+  // planOutputFiles, which returns a zero-file plan with a clear, actionable error for a null
+  // fileBreak rather than guessing one).
+  fileBreak: FileBreak | null;
 }
 
 // Which bulk-select button is active: every product shown, or only those with inventory above 0.
@@ -540,24 +547,15 @@ const FILE_BREAK_LABELS: Record<FileBreak, string> = {
   variant: 'Variant',
 };
 
-// MIGRATION NOTE for existing templates: a template saved before `fileBreak` existed has no stored
-// value for it. This infers the value that reproduces its EXISTING rendered behavior EXACTLY (see
-// planOutputFiles' old inference logic, which this mirrors), so opening, previewing, or resaving an
-// already-saved template never silently changes what it produces:
-//  - a body with an untied variant foreach ({{ #product.foreach, tied=FALSE }}) always produced one
-//    file per variant, no matter what else was in the body -> 'variant'.
-//  - otherwise, a body with a {{ #selection.foreach }} produced one combined file (or chunked files
-//    when the foreach declared a max size) -> 'selection'.
-//  - otherwise, the long-standing default was one file per variant row -> 'variant'.
-// This inference runs every time a legacy template is READ (it is NOT a one-time migration written
-// back to storage) -- so a legacy template keeps rendering identically forever, until a merchant
-// opens it in the editor and explicitly changes the new "File break" dropdown, at which point the
-// chosen value is saved and this inference no longer applies to that template.
-function inferLegacyFileBreak(body: string): FileBreak {
-  if (hasUntiedVariantLoop(body)) return 'variant';
-  if (hasForeach(body)) return 'selection';
-  return 'variant';
-}
+// RETIRED as of session 7, per explicit direction ("depreciate inferred file type -- this now must
+// be user specified"): a template saved before `fileBreak` existed (session 4) used to have a value
+// GUESSED for it from what the body happened to contain (an untied variant foreach -> 'variant'; a
+// selection.foreach -> 'selection'; otherwise -> 'variant', the long-standing default). That
+// inference is gone. `mapStoredTemplate` below now leaves `fileBreak` as `null` for any such
+// template instead of guessing -- explicit, and visibly unset in the editor, until a merchant opens
+// it and chooses one. `planOutputFiles` refuses to build any file for a null fileBreak (a clear,
+// actionable error, not a guess) rather than silently defaulting to something that might not match
+// what a merchant actually wants for that specific template.
 
 // Map one raw entry from the stored JSON array into a TemplateData, defaulting missing fields and
 // generating an id when absent. JSON parsing already yields real newline characters, so no extra
@@ -565,11 +563,11 @@ function inferLegacyFileBreak(body: string): FileBreak {
 function mapStoredTemplate(entry: any): TemplateData {
   const title = typeof entry?.title === 'string' ? entry.title : '';
   const body = typeof entry?.body === 'string' ? entry.body : '';
-  const fileBreak: FileBreak =
+  const fileBreak: FileBreak | null =
     typeof entry?.fileBreak === 'string' &&
     (FILE_BREAK_VALUES as string[]).includes(entry.fileBreak)
       ? (entry.fileBreak as FileBreak)
-      : inferLegacyFileBreak(body);
+      : null;
   return {
     id: typeof entry?.id === 'string' && entry.id ? entry.id : generateTemplateId(title),
     title,
@@ -787,7 +785,10 @@ const PRODUCT_FIELD_DEFS: ProductFieldDef[] = [
   { key: 'currencyCode', label: 'Currency code', resolve: (p) => p.currencyCode },
   { key: 'createdAt', label: 'Created at', resolve: (p) => p.createdAt },
   { key: 'updatedAt', label: 'Updated at', resolve: (p) => p.updatedAt },
-  { key: 'notes', label: 'Product note', aliases: ['note'], resolve: (p) => p.note || '' },
+  // 'note' (singular) is the canonical key as of session 7, per explicit direction ("everything
+  // should be note, like {{ product.note }}") -- 'notes' kept as an alias so any already-saved
+  // template using the old {{ product.notes }} spelling keeps rendering unchanged.
+  { key: 'note', label: 'Product note', aliases: ['notes'], resolve: (p) => p.note || '' },
 ];
 
 const PRODUCT_FIELD_TOKENS: { token: string; label: string }[] = PRODUCT_FIELD_DEFS.map((f) => ({
@@ -845,9 +846,14 @@ const LENGTH_TOKEN = '{{ length={{ product.title }} }}';
 // the delineator (empty by default).
 const REPEAT_BLOCK = '{{ #repeat=2, delineator= }}\n{{/repeat}}';
 
-// Snippet inserted by the "While loop" menu option: a bounded counting loop that does not step
-// through the product selection. It MUST be closed with {{/while}}.
-const WHILE_BLOCK = '{{ while=TRUE, {{ k }} = 1<5 }}\n{{/while}}';
+// Snippet inserted by the "While loop" menu option: a loop that re-tests a boolean condition every
+// step (up to a hard MAX_WHILE_ITERATIONS safety cap) and does not step through the product
+// selection. It MUST be closed with {{/while}}. This is the new, recommended `{{ #while=BOOL }}`
+// form (session 6) -- no counter is bound by the tag itself; the example below declares and steps
+// its own ordinary variable, exactly as any other counter would be. (The old
+// `{{ while=BOOL, {{ k }} = MIN<MAX }}` form, with a tag-bound counter, still works for any
+// already-saved template -- see WHILE_OPEN_SOURCE's comment.)
+const WHILE_BLOCK = '{{ x = 1 }}\n{{ #while={{x}}<5 }}\n{{ x = {{ ={{x}}+1 }} }}\n{{/while}}';
 
 // Snippet inserted by the "Index" menu option: returns a single character of its inner content.
 const INDEX_BLOCK = '{{ #index=0 }}\n{{/index}}';
@@ -856,12 +862,33 @@ const INDEX_BLOCK = '{{ #index=0 }}\n{{/index}}';
 // rendered output at a character position relative to the block.
 const INSERT_BLOCK = '{{ #insert=0, drop=FALSE }}\n{{/insert}}';
 
-// Snippet inserted by the "Variant foreach" menu option: steps through the current product's variants.
-const VARIANT_LOOP_BLOCK =
-  '{{ #product.foreach, l=0, tied=TRUE }}\n{{ variant.title }}\n{{/product.foreach}}';
+// Snippet inserted by the "Variant foreach" menu option: steps through the current product/row's
+// variants. `variants.foreach` is the new, recommended spelling (session 6) -- the old
+// `product.foreach` spelling (no label slot) still works forever as a plain alias. The label after
+// `variants.foreach` (here `v`) is purely cosmetic, like `selection.foreach`'s trailing word -- the
+// loop item is always read via the existing `{{ variant.* }}` tokens, not the label.
+const VARIANT_LOOP_BLOCK = '{{ #variants.foreach v, l=0 }}\n{{ variant.title }}\n{{/variants.foreach}}';
+
+// Snippet inserted by the "Notes foreach" menu option (new, session 6): steps through the
+// selection's free-standing notes. Every {{ product.* }}/{{ variant.* }} token except
+// {{ product.note }} resolves to '' for a note, same rule as every other per-unit render of a note
+// (see noteToPseudoProduct).
+const NOTES_LOOP_BLOCK = '{{ #notes.foreach note, i=0 }}\n{{ product.note }}\n{{/notes.foreach}}';
+
+// Snippet inserted by the "Tags foreach" menu option (new, session 6): steps through the current
+// product/row's tags. Each iteration's tag text is read via the fixed {{ tag }} token (not the
+// label after `tags.foreach`, which is cosmetic, same as every other foreach source).
+const TAGS_LOOP_BLOCK = '{{ #tags.foreach tag, i=0 }}\n{{ tag }}\n{{/tags.foreach}}';
 
 // Snippet inserted by the "Boolean equation" menu option.
 const BOOLEAN_TOKEN = '{{ TRUE != FALSE }}';
+
+// Snippets inserted by the "Break" / "Skip" menu options (new, session 6) -- see BREAK_SENTINEL's
+// comment for the full mechanism. Almost always used inside an if-block's branch, so the inserted
+// snippet wraps one to be immediately useful rather than a bare token the author must wrap
+// themselves.
+const BREAK_TOKEN_BLOCK = '{{ #if={{ =0 }} }}\n{{ break }}\n{{ /if }}';
+const SKIP_TOKEN_BLOCK = '{{ #if={{ =0 }} }}\n{{ skip }}\n{{ /if }}';
 
 // Hard safety cap on while-loop iterations, on top of the required MIN/MAX bounds.
 const MAX_WHILE_ITERATIONS = 10000;
@@ -922,30 +949,35 @@ function stripComments(body: string): string {
   return body.replace(COMMENT_REGEX, '');
 }
 
-// Whitespace tokens: `{{ \n }}` (literal backslash-n between the braces) resolves to a real newline
-// and `{{ \t }}` (literal backslash-t) resolves to a single space character. Both are leading/
-// trailing whitespace agnostic between the braces. This runs as the FIRST compiler pass so the
-// resulting whitespace is present for every later pass and survives trimming that would otherwise
-// strip surrounding whitespace (e.g. inside a wrap `delineator=` value).
-// The single backslash character, built via char code so it survives source formatting untouched.
+// Whitespace tokens: `{{ /return }}` resolves to a real newline and `{{ /space }}` resolves to a
+// single space character. Both are leading/trailing whitespace agnostic between the braces. This
+// runs as the FIRST compiler pass so the resulting whitespace is present for every later pass and
+// survives trimming that would otherwise strip surrounding whitespace (e.g. inside a wrap
+// `delineator=` value).
+// The single backslash character, built via char code so it survives source formatting untouched --
+// still needed below to DETECT (and flag as deprecated) the old backslash-letter spelling.
 const BACKSLASH = String.fromCharCode(92);
-// Regex pattern strings for the literal tokens `{{ \n }}` and `{{ \t }}`. Built from BACKSLASH so no
-// literal backslash escapes appear in the source. `WS` matches optional whitespace between braces so
-// the tokens are leading/trailing whitespace agnostic (e.g. `{{ \n }}`, `{{\n}}`, `{{  \n  }}`).
+// `WS` matches optional whitespace between braces so tokens are leading/trailing whitespace agnostic
+// (e.g. `{{ /return }}`, `{{/return}}`, `{{  /return  }}`).
 const WS = BACKSLASH + 's*';
 const OPEN = BACKSLASH + '{' + BACKSLASH + '{';
 const CLOSE = BACKSLASH + '}' + BACKSLASH + '}';
-const NEWLINE_TOKEN_PATTERN = OPEN + WS + BACKSLASH + BACKSLASH + 'n' + WS + CLOSE;
-const SPACE_TOKEN_PATTERN = OPEN + WS + BACKSLASH + BACKSLASH + 't' + WS + CLOSE;
-// Interchangeable aliases: `{{ /return }}` behaves exactly like `{{ \n }}` and `{{ /space }}` behaves
-// exactly like `{{ \t }}`. Both are leading/trailing whitespace agnostic between the braces.
+// `{{ /return }}` / `{{ /space }}` are the only supported spellings as of session 7 (see
+// applyWhitespaceTokens for why the old `{{ \n }}` / `{{ \t }}` spelling is deprecated, not removed
+// outright).
 const RETURN_TOKEN_PATTERN = OPEN + WS + '/return' + WS + CLOSE;
 const SPACE_ALIAS_TOKEN_PATTERN = OPEN + WS + '/space' + WS + CLOSE;
+// RETIRED (session 7), per explicit direction -- kept only so applyWhitespaceTokens can still
+// DETECT the old spelling and flag it as deprecated, rather than letting it fall through to the
+// generic pass-through and render silently wrong (an unrecognized `\n`/`\t` two-character token
+// resolves to '', same silent-failure shape the session-6 regex bug had).
+const NEWLINE_TOKEN_PATTERN = OPEN + WS + BACKSLASH + BACKSLASH + 'n' + WS + CLOSE;
+const SPACE_TOKEN_PATTERN = OPEN + WS + BACKSLASH + BACKSLASH + 't' + WS + CLOSE;
 
-// The literal menu snippets inserted for the New line / Space options: the text `{{ \n }}` and
-// `{{ \t }}` with a real backslash. Built from BACKSLASH so source formatting cannot alter them.
-const NEWLINE_TOKEN_SNIPPET = '{{ ' + BACKSLASH + 'n }}';
-const SPACE_TOKEN_SNIPPET = '{{ ' + BACKSLASH + 't }}';
+// The literal menu snippets inserted for the New line / Space options: `{{ /return }}` and
+// `{{ /space }}`, the canonical spellings as of session 7.
+const NEWLINE_TOKEN_SNIPPET = '{{ /return }}';
+const SPACE_TOKEN_SNIPPET = '{{ /space }}';
 
 // Non-whitespace, non-brace placeholder characters that stand in for a token-produced newline / space
 // during compilation. Control chars (U+0001 / U+0002) never appear in real templates or product data,
@@ -954,20 +986,59 @@ const SPACE_TOKEN_SNIPPET = '{{ ' + BACKSLASH + 't }}';
 const NEWLINE_SENTINEL = String.fromCharCode(1);
 const SPACE_SENTINEL = String.fromCharCode(2);
 
+// `{{ break }}` / `{{ skip }}` (added session 6, loop redesign) -- like the whitespace sentinels
+// above, these are non-printable control characters (U+0003 / U+0004) that can never appear in a
+// real template or in product data, embedded in a loop iteration's rendered text by
+// renderTokenContent's bare-token check (see below) and detected+stripped ONLY by the loop-driving
+// code (expandForeachBlocks, applyVariantLoop, the tags loop, applyWhileLoop) -- every other caller
+// of renderTokens/renderTemplateText never inspects for them, so a `{{ break }}`/`{{ skip }}` typed
+// outside any loop simply renders as an invisible, inert character (effectively nothing), exactly
+// the same "outside its context, harmlessly does nothing" behavior every other loop-scoped token in
+// this file already has (e.g. `{{ variant.* }}` outside a variant loop). This mirrors the marker
+// pattern already proven out for the unresolved-variable fix (session 5): an in-band sentinel,
+// substring-detected at one specific call site, needs no new return type threaded through the whole
+// render pipeline -- far less invasive than changing every function's signature to carry a separate
+// out-of-band signal.
+// Both discard the current iteration's ENTIRE rendered output (not just the text from the token
+// onward -- text before AND after `{{ break }}`/`{{ skip }}` in that same iteration still renders
+// normally, in the usual left-to-right token order, but the iteration's combined result is thrown
+// away rather than appended once either sentinel is found in it); `{{ break }}` additionally stops
+// the loop from running any further iterations, `{{ skip }}` only discards the current one and
+// continues. Both are almost always reached conditionally, inside an `{{ #if=... }}` branch -- no
+// new conditional grammar is needed for that, it composes with the existing one for free.
+const BREAK_SENTINEL = String.fromCharCode(3);
+const SKIP_SENTINEL = String.fromCharCode(4);
+
+// Whether a loop iteration's rendered text carries a `{{ break }}` and/or `{{ skip }}` signal.
+function loopControlSignal(text: string): { discard: boolean; stop: boolean } {
+  const stop = text.indexOf(BREAK_SENTINEL) !== -1;
+  const discard = stop || text.indexOf(SKIP_SENTINEL) !== -1;
+  return { discard, stop };
+}
+
 function applyWhitespaceTokens(body: string): string {
-  // Encode `{{ \n }}` / `{{ \t }}` as sentinels. Runs as the FIRST compiler pass so the sentinels are
-  // present for every later pass. Because sentinels are not whitespace, token-produced whitespace is
-  // never eaten by trimming -- so the tokens work anywhere, including at the edge of a wrap delineator,
-  // while genuinely typed whitespace stays trim-able (agnostic). The tokens themselves are
-  // leading/trailing whitespace agnostic inside the braces (`{{ \n }}`, `{{\n}}`, `{{  \n  }}`).
-  const newlineToken = new RegExp(NEWLINE_TOKEN_PATTERN, 'g');
+  // Encode `{{ /return }}` / `{{ /space }}` as sentinels. Runs as the FIRST compiler pass so the
+  // sentinels are present for every later pass. Because sentinels are not whitespace, token-produced
+  // whitespace is never eaten by trimming -- so the tokens work anywhere, including at the edge of a
+  // wrap delineator, while genuinely typed whitespace stays trim-able (agnostic).
+  // The OLD `{{ \n }}` / `{{ \t }}` spelling is retired (session 7): matched here ONLY so it can be
+  // replaced with a visible deprecatedSyntaxMarker instead of silently doing nothing (see
+  // NEWLINE_TOKEN_PATTERN's comment) -- this must run BEFORE the sentinel replacements below, since
+  // the marker text itself is plain prose (no braces), so it cannot be mistaken for a whitespace
+  // token by a later pass.
+  const deprecatedNewline = deprecatedSyntaxMarker(
+    'the backslash-n whitespace token is retired -- use the /return token instead',
+  );
+  const deprecatedSpace = deprecatedSyntaxMarker(
+    'the backslash-t whitespace token is retired -- use the /space token instead',
+  );
+  const withDeprecatedFlagged = body
+    .replace(new RegExp(NEWLINE_TOKEN_PATTERN, 'g'), deprecatedNewline)
+    .replace(new RegExp(SPACE_TOKEN_PATTERN, 'g'), deprecatedSpace);
   const returnToken = new RegExp(RETURN_TOKEN_PATTERN, 'g');
-  const spaceToken = new RegExp(SPACE_TOKEN_PATTERN, 'g');
   const spaceAliasToken = new RegExp(SPACE_ALIAS_TOKEN_PATTERN, 'g');
-  return body
-    .replace(newlineToken, NEWLINE_SENTINEL)
+  return withDeprecatedFlagged
     .replace(returnToken, NEWLINE_SENTINEL)
-    .replace(spaceToken, SPACE_SENTINEL)
     .replace(spaceAliasToken, SPACE_SENTINEL);
 }
 
@@ -1075,9 +1146,13 @@ function resolveOnProduct(product: ProductData, parts: string[], ctx: EvalContex
         : product.variants;
     return String(list ? list.length : 0);
   }
-  // Backward-compatible alias {{ products.notes }} for the primary token {{ product.notes }} (the
-  // primary form, plus {{ product.note }}, is handled by productFieldValue below).
-  if (parts.length === 2 && parts[0] === 'products' && parts[1] === 'notes') {
+  // Backward-compatible aliases {{ products.note }} / {{ products.notes }} for the canonical
+  // {{ product.note }} token (handled by productFieldValue below, along with the {{ product.notes }}
+  // alias) -- productFieldValue's dispatch is scoped to `product.*` only, so the PLURAL object name
+  // "products" needs its own small special case here for full note/notes x product/products
+  // coverage. Session 7: 'note' is the canonical field spelling; 'notes' stays supported for any
+  // already-saved template.
+  if (parts.length === 2 && parts[0] === 'products' && (parts[1] === 'note' || parts[1] === 'notes')) {
     return product.note || '';
   }
   if (parts.length === 1 && parts[0] === 'primaryDomain') {
@@ -1205,6 +1280,10 @@ const RESERVED_ASSIGNMENT_NAMES = new Set([
   'max_wraps',
   'skip_first',
   'skip_last',
+  // Added session 6, with the loop redesign:
+  'break',
+  'skip',
+  'tag',
 ]);
 
 // Cross-check list for the reminder above: every keyword actually introduced by a
@@ -1232,6 +1311,9 @@ const RESERVED_KEYWORDS_IN_USE = [
   'max_wraps',
   'skip_first',
   'skip_last',
+  'break',
+  'skip',
+  'tag',
 ];
 for (const keyword of RESERVED_KEYWORDS_IN_USE) {
   if (!RESERVED_ASSIGNMENT_NAMES.has(keyword)) {
@@ -1347,6 +1429,13 @@ function renderTokenContent(
   if (trimmed[0] === '#' || trimmed[0] === '/') {
     return '{{' + inner + '}}';
   }
+  // RESERVED KEYWORD: 'break', 'skip' -- must stay listed in RESERVED_ASSIGNMENT_NAMES /
+  // RESERVED_KEYWORDS_IN_USE. Bare loop-control tokens (session 6) -- see BREAK_SENTINEL's comment
+  // for the full mechanism. Checked early (same tier as the block-delimiter pass-through above) so
+  // they're recognized regardless of numeric context; a loop-driving caller strips/reacts to the
+  // sentinel, every other caller just carries it through inertly.
+  if (trimmed === 'break') return BREAK_SENTINEL;
+  if (trimmed === 'skip') return SKIP_SENTINEL;
   // Math equation {{ =EXPR }}.
   if (trimmed[0] === '=') {
     const expression = renderTemplateText(trimmed.slice(1), product, allProducts, ctx, true);
@@ -1489,6 +1578,19 @@ function unresolvedVariableMarker(name: string): string {
 // broken string and silently picking a branch).
 function containsUnresolvedVariableMarker(text: string): boolean {
   return text.includes('unresolved variable "');
+}
+
+// Session 7: a general-purpose "this old syntax is retired" marker, same shape and same reasoning as
+// unresolvedVariableMarker above -- rendered in place of running the OLD behavior for a construct
+// whose old form was deliberately removed (see the while/tied/whitespace-token deprecations below),
+// so an already-saved template that used the old form fails LOUDLY and ACTIONABLY (naming exactly
+// what changed) instead of silently rendering wrong or empty output the way the regex bug and the
+// bare-variable bug both did before they were caught. Deliberately contains NO literal `{{`/`}}`
+// characters, for the same reason unresolvedVariableMarker doesn't: this text can end up back inside
+// a string that gets fed through another render pass, and a literal `{{ ... }}` written into it as a
+// "here's the fix" example would itself be resolved on that pass, corrupting the message.
+function deprecatedSyntaxMarker(description: string): string {
+  return `[[ deprecated syntax removed -- ${description} ]]`;
 }
 
 type MathToken = { type: 'num'; value: number } | { type: 'op'; value: string };
@@ -1667,8 +1769,12 @@ interface ChopMatch {
 }
 
 // RESERVED KEYWORD: 'chop', 'trim' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
-const CHOP_OPEN_SOURCE = '\{\{\s*#(?:chop|trim)=';
-const CHOP_CLOSE_SOURCE = '\{\{\s*\/(?:chop|trim)\s*\}\}';
+// Built from a REAL regex literal's `.source`, not a plain string literal (see the long comment on
+// IF_OPEN_SOURCE below for why that distinction is critical here -- a plain string literal like
+// '\{\{\s*#(?:chop|trim)=' silently loses its `\s` to plain 's', breaking this exact regex the same
+// way IF_OPEN_SOURCE was broken).
+const CHOP_OPEN_SOURCE = /\{\{\s*#(?:chop|trim)=/.source;
+const CHOP_CLOSE_SOURCE = /\{\{\s*\/(?:chop|trim)\s*\}\}/.source;
 
 function findChopBlock(body: string, fromIndex: number): ChopMatch | null {
   return findTaggedBlock(body, fromIndex, CHOP_OPEN_SOURCE, CHOP_CLOSE_SOURCE);
@@ -1877,15 +1983,31 @@ function findTaggedBlock(
 }
 
 // RESERVED KEYWORD: 'repeat' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
-const REPEAT_OPEN_SOURCE = '\{\{\s*#repeat=';
-const REPEAT_CLOSE_SOURCE = '\{\{\s*\/repeat\s*\}\}';
-// A while loop MUST open with `while=` and close with `{{/while}}`; `{{/for}}` is not accepted.
+// See IF_OPEN_SOURCE's comment further down: these are `.source` of real regex literals, NOT plain
+// string literals, because a plain string literal like '\{\{\s*#repeat=' silently loses its `\s` to
+// a literal 's' character (JS drops the backslash before any character that isn't a recognized
+// string escape), which broke every one of these tag-open/close matches for a merchant's very
+// common `{{ #repeat=... }}`-with-a-space style -- found and fixed session 6.
+const REPEAT_OPEN_SOURCE = /\{\{\s*#repeat=/.source;
+const REPEAT_CLOSE_SOURCE = /\{\{\s*\/repeat\s*\}\}/.source;
+// A while loop MUST open with `while=` (with or without a leading `#` -- see below) and close with
+// `{{/while}}`; `{{/for}}` is not accepted.
 // RESERVED KEYWORD: 'while' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
-const WHILE_OPEN_SOURCE = '\{\{\s*while=';
-const WHILE_CLOSE_SOURCE = '\{\{\s*\/while\s*\}\}';
+// The leading `#` is still accepted as OPTIONAL purely for open-tag DETECTION (`while` used to be the
+// only block tag written without one; every other opener has always had it -- found session 6) --
+// this is unrelated to the counter-binding deprecation below, just leniency in finding the tag at
+// all. `{{ #while=BOOL }}` is the only supported/canonical form as of session 7 (see WHILE_BLOCK
+// below). The OLD `{{ while=BOOL, {{ k }} = MIN<MAX }}` shape (a tag-bound counter, told apart from
+// the new form by a top-level comma in the params -- see parseWhileParams) is RETIRED, per explicit
+// direction: it is still recognized (so the tag is found rather than falling through to a raw-tag
+// echo, the session-6 regex bug's exact failure shape) but no longer RUN -- a template using it now
+// renders a visible deprecatedSyntaxMarker instead of the old bounded loop. No inference, no silent
+// fallback: an old template using this form needs to be opened and updated.
+const WHILE_OPEN_SOURCE = /\{\{\s*#?while=/.source;
+const WHILE_CLOSE_SOURCE = /\{\{\s*\/while\s*\}\}/.source;
 // RESERVED KEYWORD: 'index' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
-const INDEX_OPEN_SOURCE = '\{\{\s*#index=';
-const INDEX_CLOSE_SOURCE = '\{\{\s*\/index\s*\}\}';
+const INDEX_OPEN_SOURCE = /\{\{\s*#index=/.source;
+const INDEX_CLOSE_SOURCE = /\{\{\s*\/index\s*\}\}/.source;
 
 function findRepeatBlock(body: string, fromIndex: number): TaggedBlock | null {
   return findTaggedBlock(body, fromIndex, REPEAT_OPEN_SOURCE, REPEAT_CLOSE_SOURCE);
@@ -1900,10 +2022,28 @@ function findIndexBlock(body: string, fromIndex: number): TaggedBlock | null {
 }
 
 // RESERVED KEYWORD: 'insert' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
-const INSERT_OPEN_SOURCE = '\{\{\s*#insert=';
-const INSERT_CLOSE_SOURCE = '\{\{\s*\/insert\s*\}\}';
-const VARIANT_LOOP_OPEN_SOURCE = '\{\{\s*#product\.foreach';
-const VARIANT_LOOP_CLOSE_SOURCE = '\{\{\s*\/product\.foreach\s*\}\}';
+// (See IF_OPEN_SOURCE's comment further down for why these are real-regex-literal `.source`, not
+// plain string literals.)
+const INSERT_OPEN_SOURCE = /\{\{\s*#insert=/.source;
+const INSERT_CLOSE_SOURCE = /\{\{\s*\/insert\s*\}\}/.source;
+// `{{ #variants.foreach [LABEL], l=0 }}` is the new, recommended spelling of this loop (iterates the
+// CURRENT product/row's variants) -- `variant.foreach`/`variants.foreach` -- found session 6:
+// `product.foreach` (the original, still-supported spelling) reused the word "product" to mean the
+// loop's OWNER rather than the thing being iterated, which directly clashed with
+// `selection.foreach product`'s use of the SAME word to mean the loop's ITEM -- confusing when read
+// side by side. `product.foreach` (with no label slot at all -- its exact original shape) is kept
+// working forever as a plain alias; no existing template needs to change. The optional LABEL after
+// `variant(s).foreach` (like `selection.foreach`'s trailing word) is purely cosmetic/for readability
+// -- it is not bound to anything; the loop item is always read via the existing `{{ variant.* }}`
+// tokens, same as before.
+const VARIANT_LOOP_OPEN_SOURCE = /\{\{\s*#(?:variants?\.foreach(?:\s+[^\s,{}]+)?|product\.foreach)/.source;
+const VARIANT_LOOP_CLOSE_SOURCE = /\{\{\s*\/(?:variants?\.foreach|product\.foreach)\s*\}\}/.source;
+// `{{ #tags.foreach [LABEL], i=0 }}` (new, session 6): steps through the CURRENT product/row's tags.
+// The optional LABEL is purely cosmetic, same as every other foreach source's trailing word -- the
+// loop item is always read via the fixed `{{ tag }}` token (see applyTagsLoop), not the label.
+// RESERVED KEYWORD: 'tag' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
+const TAGS_LOOP_OPEN_SOURCE = /\{\{\s*#tags\.foreach(?:\s+[^\s,{}]+)?/.source;
+const TAGS_LOOP_CLOSE_SOURCE = /\{\{\s*\/tags\.foreach\s*\}\}/.source;
 
 function findInsertBlock(body: string, fromIndex: number): TaggedBlock | null {
   return findTaggedBlock(body, fromIndex, INSERT_OPEN_SOURCE, INSERT_CLOSE_SOURCE);
@@ -1911,6 +2051,10 @@ function findInsertBlock(body: string, fromIndex: number): TaggedBlock | null {
 
 function findVariantLoopBlock(body: string, fromIndex: number): TaggedBlock | null {
   return findTaggedBlock(body, fromIndex, VARIANT_LOOP_OPEN_SOURCE, VARIANT_LOOP_CLOSE_SOURCE);
+}
+
+function findTagsLoopBlock(body: string, fromIndex: number): TaggedBlock | null {
+  return findTaggedBlock(body, fromIndex, TAGS_LOOP_OPEN_SOURCE, TAGS_LOOP_CLOSE_SOURCE);
 }
 
 // Parse the insert tag parameters: the character position N (first top-level comma segment) and the
@@ -1971,26 +2115,40 @@ function applyInsert(
   );
 }
 
-// Parse the variant foreach parameters: `l=<START>` (counter start, default 0) and `tied=TRUE|FALSE`
-// (TRUE unless the literal FALSE is given).
+// Parse the variant foreach parameters: `l=<START>` (counter start, default 0). `tied=TRUE|FALSE` is
+// RETIRED as of session 7, per explicit direction -- it is still DETECTED (`deprecatedTied`) so a
+// template that wrote it can be told it no longer does anything, but no longer read for behavior: a
+// variant loop now ALWAYS iterates the current row's in-scope variant set (see applyVariantLoop),
+// matching what "untied" used to mean. The tied/untied split existed to let a variant loop show every
+// variant inline (tied) while ALSO letting file-splitting infer "one file per variant" from an
+// untied loop, before fileBreak was an explicit, stored setting (session 4) -- with fileBreak now
+// always explicit, the split no longer serves a purpose, and standardizing on "always respect the
+// current variant scope" is a straightforward, low-risk change: the two behaviors only ever diverged
+// for a product whose variants were manually narrowed via the variant-selection checklist (also
+// session 4) -- for any product with every variant still selected (the default, and the only
+// possible state before session 4 existed), `product.variants` already equals `product.allVariants`
+// in content, so this generalization does not change rendered output for the overwhelming majority
+// of already-saved templates.
 function parseVariantLoopParams(
   rawParams: string,
   product: ProductData,
   allProducts: ProductData[],
   ctx: EvalContext,
-): { start: number; tied: boolean; name: string } {
+): { start: number; name: string; deprecatedTied: boolean } {
   const segments = splitTopLevelCommas(rawParams);
   let start = 0;
-  let tied = true;
   let name = 'l';
+  let deprecatedTied = false;
   for (const segment of segments) {
     const eqIndex = segment.indexOf('=');
     if (eqIndex === -1) continue;
     const key = segment.slice(0, eqIndex).trim();
     const value = segment.slice(eqIndex + 1).trim();
     // RESERVED KEYWORD: 'tied' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
+    // Retired (session 7): detected only so it can be flagged as deprecated, no longer read for
+    // behavior -- see this function's own comment above.
     if (key.toLowerCase() === 'tied') {
-      tied = value.toUpperCase() !== 'FALSE';
+      deprecatedTied = true;
     } else if (isVariableName(key)) {
       // Any variable may be the variant counter; `l` is only the default name.
       name = key;
@@ -1998,50 +2156,103 @@ function parseVariantLoopParams(
       start = resolved == null ? 0 : Math.round(resolved);
     }
   }
-  return { start, tied, name };
+  return { start, name, deprecatedTied };
 }
 
-// Render a variant foreach block. A TIED loop iterates the product's FULL variant list inline; an
-// UNTIED loop renders only the current row's variant, because untied output is split into one file
-// per variant by buildOutputFiles. Each iteration renders the inner content against a product clone
-// whose active variant is the iterated one, with `{{ l }}` bound to the counter.
+// Render a variant foreach block: always iterates the current row's in-scope variant set
+// (`product.variants`, falling back to the product's full variant list only if that's somehow
+// empty -- the same fallback convention `productUnits` already uses elsewhere in this file). Each
+// iteration renders the inner content against a product clone whose active variant is the iterated
+// one, with `{{ l }}` (or whichever name was chosen) bound to the counter.
 function applyVariantLoop(
   inner: string,
-  params: { start: number; tied: boolean; name: string },
+  params: { start: number; name: string; deprecatedTied: boolean },
   product: ProductData,
   allProducts: ProductData[],
   ctx: EvalContext,
 ): string {
-  const fullList =
-    product.allVariants && product.allVariants.length > 0 ? product.allVariants : product.variants;
-  const iterated = params.tied ? fullList : product.variants;
+  const iterated =
+    product.variants && product.variants.length > 0 ? product.variants : product.allVariants;
+  const deprecationPrefix = params.deprecatedTied
+    ? deprecatedSyntaxMarker(
+        'the tied parameter no longer does anything -- a variant loop always follows the current ' +
+          'variant selection now; remove it',
+      )
+    : '';
   if (!iterated || iterated.length === 0) {
     ctx.vars[params.name] = String(params.start);
-    return renderTokens(inner, product, allProducts, ctx);
+    return deprecationPrefix + renderTokens(inner, product, allProducts, ctx);
   }
-  return iterated
-    .map((variant, index) => {
-      // First iteration takes the declared start value; every later iteration performs
-      // `name = name + 1` against the CURRENT stored value, so counts carry across nested loops.
-      const value = index === 0 ? params.start : readVarNumber(ctx.vars, params.name) + 1;
-      ctx.vars[params.name] = String(value);
-      return renderTokens(inner, { ...product, variants: [variant] }, allProducts, ctx);
-    })
-    .join('');
+  // A plain imperative loop (not .map().join()) so a `{{ break }}` in the inner content can stop
+  // iterating early -- see BREAK_SENTINEL's comment. `{{ skip }}` discards just the current
+  // iteration's rendered text and continues.
+  let output = deprecationPrefix;
+  for (let index = 0; index < iterated.length; index++) {
+    // First iteration takes the declared start value; every later iteration performs
+    // `name = name + 1` against the CURRENT stored value, so counts carry across nested loops.
+    const value = index === 0 ? params.start : readVarNumber(ctx.vars, params.name) + 1;
+    ctx.vars[params.name] = String(value);
+    const rendered = renderTokens(inner, { ...product, variants: [iterated[index]] }, allProducts, ctx);
+    const signal = loopControlSignal(rendered);
+    if (!signal.discard) output += rendered;
+    if (signal.stop) break;
+  }
+  return output;
 }
 
-// Whether the body contains a variant foreach declared with `tied=FALSE`, which forces one output
-// file per variant.
-function hasUntiedVariantLoop(body: string): boolean {
-  const cleaned = stripComments(body);
-  let cursor = 0;
-  while (cursor < cleaned.length) {
-    const block = findVariantLoopBlock(cleaned, cursor);
-    if (!block) return false;
-    if (/tied\s*=\s*FALSE/i.test(block.params)) return true;
-    cursor = block.blockEnd;
+// Parse the tags-loop tag parameters: just an optional counter (`i=START`), same shape as the
+// variant loop minus `tied` (tags have no analogous concept). The LABEL slot the open tag itself
+// may carry (see TAGS_LOOP_OPEN_SOURCE) is not parsed here at all -- it is consumed by the open
+// regex and is purely cosmetic, exactly like every other foreach source's trailing word.
+function parseTagsLoopParams(
+  rawParams: string,
+  product: ProductData,
+  allProducts: ProductData[],
+  ctx: EvalContext,
+): { start: number; name: string } {
+  const segments = splitTopLevelCommas(rawParams);
+  let start = 0;
+  let name = 'i';
+  for (const segment of segments) {
+    const eqIndex = segment.indexOf('=');
+    if (eqIndex === -1) continue;
+    const key = segment.slice(0, eqIndex).trim();
+    const value = segment.slice(eqIndex + 1).trim();
+    if (isVariableName(key)) {
+      name = key;
+      const resolved = resolveExprToNumber(value, product, allProducts, ctx);
+      start = resolved == null ? 0 : Math.round(resolved);
+    }
   }
-  return false;
+  return { start, name };
+}
+
+// Render a tags-loop block: steps through the CURRENT product/row's tags (product.tags), binding
+// each tag's text into the fixed `{{ tag }}` token (via ctx.vars, the SAME mechanism a numeric
+// counter already uses -- resolveOnProduct's vars-store lookup doesn't care whether the stored value
+// looks like a number or arbitrary text) for the duration of that one iteration, plus an optional
+// counter (`{{ i }}` by default) exactly like every other foreach source. A product with no tags
+// renders the inner content zero times (there is nothing to bind `{{ tag }}` to). Supports
+// `{{ break }}`/`{{ skip }}` like every other loop -- see BREAK_SENTINEL's comment.
+function applyTagsLoop(
+  inner: string,
+  params: { start: number; name: string },
+  product: ProductData,
+  allProducts: ProductData[],
+  ctx: EvalContext,
+): string {
+  const tags = product.tags || [];
+  let output = '';
+  for (let index = 0; index < tags.length; index++) {
+    const counterValue = index === 0 ? params.start : readVarNumber(ctx.vars, params.name) + 1;
+    ctx.vars[params.name] = String(counterValue);
+    ctx.vars.tag = tags[index];
+    const rendered = renderTokens(inner, product, allProducts, ctx);
+    const signal = loopControlSignal(rendered);
+    if (!signal.discard) output += rendered;
+    if (signal.stop) break;
+  }
+  return output;
 }
 
 // Return the single character at 0-based position `index` of the rendered inner content. A negative
@@ -2099,87 +2310,61 @@ function applyRepeat(innerRendered: string, count: number | null, delineator: st
   return copies.join(delineator);
 }
 
-// Parse the while tag parameters: `BOOLEAN, {{ k }} = MIN<MAX`. The condition is the first top-level
-// comma segment (outer grouping braces stripped); the rest is the counter assignment. Returns null
-// when the counter name or either bound is missing/unparseable, or when MIN > MAX.
-function parseWhileParams(
-  rawParams: string,
-  product: ProductData,
-  allProducts: ProductData[],
-  ctx: EvalContext,
-): { condition: string; name: string; min: number; max: number } | null {
+// Parsed while-tag parameters. Only ONE form is now run: 'unbounded' (`{{ #while=BOOL }}`) -- just a
+// condition, no bound counter. Iterates up to MAX_WHILE_ITERATIONS times, re-testing the condition
+// before every step; a counter, if wanted, is the author's own ordinary variable, declared/
+// incremented in the body like any other assignment -- the while tag itself does not bind or step
+// one. The OLD bounded form (`{{ while=BOOL, {{ k }} = MIN<MAX }}`, with a tag-bound counter) is
+// RETIRED as of session 7 -- see WHILE_OPEN_SOURCE's comment. It is still DETECTED (a top-level comma
+// in the params is the tell) so a template that used it can be told exactly what to change, via
+// 'deprecated', rather than either running the old semantics forever or falling through to the
+// generic pass-through and rendering completely raw tags (the same silent-failure shape the session-6
+// regex bug had).
+type WhileParams =
+  | { form: 'unbounded'; condition: string }
+  | { form: 'deprecated' };
+
+// Parse the while tag parameters. A rawParams string with no top-level comma is the (only supported)
+// unbounded form -- the whole thing is the condition. One WITH a top-level comma is the old
+// bounded form's shape (`BOOLEAN, {{ k }} = MIN<MAX`); it is recognized ONLY so it can be flagged as
+// deprecated, not parsed further or run.
+function parseWhileParams(rawParams: string): WhileParams {
   const segments = splitTopLevelCommas(rawParams);
-  if (segments.length < 2) return null;
-  const condition = unwrapChopCondition(segments[0] || '');
-  const assignment = segments.slice(1).join(',');
-  // Find the assignment `=` that sits outside any {{ }} group.
-  let depth = 0;
-  let eqIndex = -1;
-  for (let i = 0; i < assignment.length; i++) {
-    if (assignment[i] === '{' && assignment[i + 1] === '{') {
-      depth += 1;
-      i += 1;
-      continue;
-    }
-    if (assignment[i] === '}' && assignment[i + 1] === '}') {
-      if (depth > 0) depth -= 1;
-      i += 1;
-      continue;
-    }
-    if (assignment[i] === '=' && depth === 0) {
-      eqIndex = i;
-      break;
-    }
+  if (segments.length < 2) {
+    return { form: 'unbounded', condition: unwrapChopCondition(segments[0] || '') };
   }
-  if (eqIndex === -1) return null;
-  const nameRaw = assignment.slice(0, eqIndex).trim().replace(/^\{\{/, '').replace(/\}\}$/, '');
-  const name = nameRaw.trim();
-  // Reuse the one shared variable-name pattern (see IDENTIFIER_REGEX above) instead of a second,
-  // separately hand-maintained copy of the same shape check.
-  if (!IDENTIFIER_REGEX.test(name)) return null;
-  const boundsRaw = assignment.slice(eqIndex + 1);
-  const ltIndex = boundsRaw.indexOf('<');
-  if (ltIndex === -1) return null;
-  const minValue = resolveExprToNumber(boundsRaw.slice(0, ltIndex), product, allProducts, ctx);
-  const maxValue = resolveExprToNumber(boundsRaw.slice(ltIndex + 1), product, allProducts, ctx);
-  if (minValue == null || maxValue == null) return null;
-  const min = Math.round(minValue);
-  const max = Math.round(maxValue);
-  if (min > max) return null;
-  return { condition, name, min, max };
+  return { form: 'deprecated' };
 }
 
-// Run a while loop: the counter starts at min and a step runs only while the counter is STRICTLY
-// less than max (capped at MAX_WHILE_ITERATIONS) AND the condition is TRUE. The condition is
-// re-evaluated before each step with the counter bound (an empty condition is treated as TRUE); a
-// FALSE condition means that step does not evaluate and the loop ends. Each iteration renders the
-// inner content through the full pipeline. The loop never steps through the product selection, so
-// the same product/context is used every iteration.
+// Run a while loop (unbounded form only -- see WhileParams' comment). Runs up to
+// MAX_WHILE_ITERATIONS steps (the hard safety backstop), re-testing the condition before every step,
+// binding no counter at all. The condition is re-evaluated before each step (an empty condition is
+// treated as TRUE); a FALSE condition means that step does not run and the loop ends. Each iteration
+// renders the inner content through the full pipeline. The loop never steps through the product
+// selection, so the same product/context is used every iteration.
 function applyWhileLoop(
   inner: string,
-  params: { condition: string; name: string; min: number; max: number },
+  params: { form: 'unbounded'; condition: string },
   product: ProductData,
   allProducts: ProductData[],
   ctx: EvalContext,
 ): string {
-  const steps = Math.min(params.max - params.min, MAX_WHILE_ITERATIONS);
   let output = '';
-  for (let step = 0; step < steps; step++) {
-    ctx.vars[params.name] = String(params.min + step);
-    if (
-      params.condition.trim() !== '' &&
-      !conditionIsTrue(params.condition, product, allProducts, ctx)
-    ) {
+  for (let step = 0; step < MAX_WHILE_ITERATIONS; step++) {
+    if (params.condition.trim() !== '' && !conditionIsTrue(params.condition, product, allProducts, ctx)) {
       break;
     }
-    output += renderTokens(inner, product, allProducts, ctx);
+    const rendered = renderTokens(inner, product, allProducts, ctx);
+    const signal = loopControlSignal(rendered);
+    if (!signal.discard) output += rendered;
+    if (signal.stop) break;
   }
   return output;
 }
 
-// Locate the next chop / repeat / index / while block at or after `fromIndex`, whichever starts
-// earliest.
-type RenderBlockKind = 'chop' | 'repeat' | 'index' | 'insert' | 'variants' | 'while';
+// Locate the next chop / repeat / index / insert / variants / tags / while block at or after
+// `fromIndex`, whichever starts earliest.
+type RenderBlockKind = 'chop' | 'repeat' | 'index' | 'insert' | 'variants' | 'tags' | 'while';
 
 interface RenderBlock extends TaggedBlock {
   kind: RenderBlockKind;
@@ -2203,6 +2388,8 @@ function findNextRenderBlock(body: string, fromIndex: number): RenderBlock | nul
   if (insertBlock) candidates.push({ ...insertBlock, kind: 'insert' });
   const variantLoop = findVariantLoopBlock(body, fromIndex);
   if (variantLoop) candidates.push({ ...variantLoop, kind: 'variants' });
+  const tagsLoop = findTagsLoopBlock(body, fromIndex);
+  if (tagsLoop) candidates.push({ ...tagsLoop, kind: 'tags' });
   const loop = findWhileBlock(body, fromIndex);
   if (loop) candidates.push({ ...loop, kind: 'while' });
   if (candidates.length === 0) return null;
@@ -2388,7 +2575,31 @@ interface IfMatch {
 // if-blocks can't fully delegate to findTaggedBlock itself, since they also need to track an
 // optional top-level {{ #else }} marker, which the generic close-scan doesn't support).
 // RESERVED KEYWORD: 'if', 'else' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
-const IF_OPEN_SOURCE = '\{\{\s*#if=';
+//
+// THIS MUST BE `.source` OF A REAL REGEX LITERAL, NOT A PLAIN STRING LITERAL -- found and fixed
+// session 6, after it caused every `{{ #if=... }}` with a space after `{{` (the app's own inserted
+// If-block snippet included) to silently fail to be recognized as a block at all. A plain string
+// literal such as '\{\{\s*#if=' does NOT mean what it looks like: JavaScript string literals drop
+// the backslash before any character that isn't one of a fixed set of recognized escapes (\n \t \\
+// \' \" ... ), so `\{` becomes plain `{` and, critically, `\s` becomes plain `s` -- the string
+// actually held by that constant is `{{s*#if=`, whose meaning AS A REGEX is "literal `{{`, then zero
+// or more literal lowercase `s` characters, then literal `#if=`". That matches `{{#if=` (zero `s`s)
+// by coincidence, but NOT `{{ #if=` (a space is not an `s`), so any if-block written with the
+// conventional space -- exactly what `IF_BLOCK` below inserts -- silently vanished from the parser's
+// view entirely: `findBlockOpen`'s `new RegExp(IF_OPEN_SOURCE, 'g')` never matched, `findIfBlock`
+// returned null, and the ENTIRE `{{ #if=... }} ... {{ /if }}` span (condition, `{{ #else }}`,
+// closing tag, all of it) fell through unprocessed to the generic per-token scanner, which -- via
+// the separate, correctly brace-depth-aware `findMatchingClose` -- still delimited it as one valid
+// token and echoed it back completely verbatim (see renderTokenContent's `#`/`/` pass-through). This
+// was verified directly against a real JS engine (not just reasoned about), including a byte-for-
+// byte reproduction of the exact broken output a merchant reported.
+// `/PATTERN/.source` sidesteps the whole class of bug: a regex LITERAL's contents are parsed by the
+// regex grammar, not the string-escape grammar, so `\{` and `\s` inside `/.../ ` keep their intended
+// meaning, and `.source` hands back that exact pattern text as a string, safe to feed into
+// `new RegExp(...)` or to concatenate with other such sources (as findTaggedBlock does). Every other
+// tag-open/close source constant in this file (CHOP_*, REPEAT_*, WHILE_*, INDEX_*, INSERT_*,
+// VARIANT_LOOP_*) had exactly this same bug and was fixed the same way in the same pass.
+const IF_OPEN_SOURCE = /\{\{\s*#if=/.source;
 
 function findIfBlock(body: string, fromIndex: number): IfMatch | null {
   const open = findBlockOpen(body, fromIndex, IF_OPEN_SOURCE);
@@ -2574,9 +2785,18 @@ function renderTokens(
     } else if (match.kind === 'variants') {
       const variantParams = parseVariantLoopParams(match.params, product, list, ctx);
       result += applyVariantLoop(match.inner, variantParams, product, allProducts, ctx);
+    } else if (match.kind === 'tags') {
+      const tagsParams = parseTagsLoopParams(match.params, product, list, ctx);
+      result += applyTagsLoop(match.inner, tagsParams, product, allProducts, ctx);
     } else {
-      const loopParams = parseWhileParams(match.params, product, list, ctx);
-      if (loopParams) {
+      const loopParams = parseWhileParams(match.params);
+      if (loopParams.form === 'deprecated') {
+        result += deprecatedSyntaxMarker(
+          'the old while form with a tag-bound counter (condition, comma, counter assignment) is ' +
+            'retired -- write a hash-while token with just the boolean condition, and declare/' +
+            'increment your own counter variable in the body instead',
+        );
+      } else {
         result += applyWhileLoop(match.inner, loopParams, product, allProducts, ctx);
       }
     }
@@ -2785,20 +3005,12 @@ function applyWrapBlocks(text: string): string {
 // Includes the chunk-size helpers (firstForeachChunkSize/firstForeachIteratedCount) used by
 // planCombined below to decide whether one template body must become multiple output files.
 // ----------------------------------------------------------------------------------------------
-// A foreach loop is present if there is an opening `{{#selection.foreach product ...}}` tag and a
-// matching `{{/selection.foreach product}}` closing tag. Detected on the comment-stripped body so a
-// foreach that lives only inside a comment block is not counted. Uses the brace-aware block finder so
-// tag params containing {{ }} tokens are matched correctly.
-function hasForeach(body: string): boolean {
-  return findForeachBlock(flattenForeachInsideWhile(stripComments(body)), 0) !== null;
-}
-
 // Remove every complete foreach block's TAGS from `text`, keeping the inner content (recursively).
 function unwrapForeachBlocks(text: string): string {
   let result = '';
   let cursor = 0;
   while (cursor < text.length) {
-    const block = findForeachBlock(text, cursor);
+    const block = findSelectionScopeForeachBlock(text, cursor);
     if (!block) {
       result += text.slice(cursor);
       break;
@@ -2880,41 +3092,106 @@ function parseForeachOptions(paramString: string | undefined): {
   return { skipFirst, skipLast, name, startExpr, maxExpr };
 }
 
-// Locate the first foreach opening tag in the (comment-stripped) body using a brace-depth-aware scan
-// so the tag's parameters may themselves contain {{ }} tokens. Returns the tag's parameter string
-// (the text after `#selection.foreach product` up to the tag's closing `}}`), the inner content
-// between the opening and its matching closing `{{/selection.foreach product}}`, and the start/end
-// indices of the whole block. Returns null when no complete foreach block is found.
-interface ForeachMatch {
-  params: string;
-  inner: string;
-  blockStart: number;
-  blockEnd: number;
+// Regex sources for the three selection-scope foreach spellings (session 6). All three accept an
+// OPTIONAL free-form label after `.foreach` (e.g. `{{ #selection.foreach product, i=0 }}`) that is
+// purely cosmetic, exactly like every other foreach source's trailing word -- previously
+// `selection.foreach` REQUIRED that word to be the literal `product`/`products`, which meant nothing
+// (it was never bound to anything) and directly clashed with `product.foreach`'s unrelated use of
+// the same word to mean the loop's OWNER rather than its item (found session 6). The closing tag's
+// trailing word is likewise now optional/free-form (previously also required to literally be
+// `product`/`products`).
+//  - `selection.foreach KEYWORD` dispatches on KEYWORD (session 7, per explicit direction), read
+//    from the SAME label slot described above (still optional and still free-form for any other
+//    word, which keeps meaning "products only" for backward compatibility -- see below):
+//      * `product` / `products` / no keyword at all -- PRODUCTS ONLY (variant-expanded rows).
+//        Exactly the behavior `selection.foreach` has always had, deliberately UNCHANGED so no
+//        existing template's rendered output is affected by this generalization.
+//      * `object` / `objects` -- PRODUCTS THEN NOTES, combined, in that order (mirroring the
+//        'object' fileBreak mode's own ordering) -- new, and the only way any selection-scope loop
+//        includes both in one pass.
+//      * `note` / `notes` -- NOTES ONLY (each rendered as a pseudo-product via noteToPseudoProduct).
+//  - `products.foreach` / `notes.foreach` are separate, independent tags with the SAME two
+//    behaviors (products-only / notes-only respectively) available as their own top-level spelling
+//    -- kept from session 6 alongside the KEYWORD dispatch above rather than retired by it; the two
+//    are simply two ways to write the same thing (`products.foreach` == `selection.foreach
+//    product`), consistent with this file's general pattern of accepting more than one spelling for
+//    the same concept.
+// RESERVED KEYWORD: none of 'selection'/'products'/'notes'/'object' need to be in
+// RESERVED_ASSIGNMENT_NAMES -- they are only special immediately followed by `.foreach` (or, for
+// product/products/object/objects/note/notes, only inside a `selection.foreach` label slot), so
+// e.g. `{{ products = X }}` (no `.foreach`) is unaffected and remains an ordinary variable
+// assignment.
+const SELECTION_FOREACH_OPEN_SOURCE = /\{\{\s*#selection\.foreach(?:\s+[^\s,{}]+)?/.source;
+const SELECTION_FOREACH_CLOSE_SOURCE = /\{\{\s*\/selection\.foreach(?:\s+[^\s,{}]+)?\s*\}\}/.source;
+const PRODUCTS_FOREACH_OPEN_SOURCE = /\{\{\s*#products\.foreach(?:\s+[^\s,{}]+)?/.source;
+const PRODUCTS_FOREACH_CLOSE_SOURCE = /\{\{\s*\/products\.foreach(?:\s+[^\s,{}]+)?\s*\}\}/.source;
+const NOTES_FOREACH_OPEN_SOURCE = /\{\{\s*#notes\.foreach(?:\s+[^\s,{}]+)?/.source;
+const NOTES_FOREACH_CLOSE_SOURCE = /\{\{\s*\/notes\.foreach(?:\s+[^\s,{}]+)?\s*\}\}/.source;
+// Recognizes exactly the six dispatch keywords in `selection.foreach KEYWORD`'s label slot -- used
+// to read back what findTaggedBlock's own open-tag match already consumed (see
+// findSelectionScopeForeachBlock), since findTaggedBlock's generic shape does not itself expose
+// capture groups from the open-tag regex it was given.
+const SELECTION_FOREACH_KEYWORD_REGEX =
+  /^\{\{\s*#selection\.foreach(?:\s+(product|products|object|objects|note|notes))?/i;
+
+// Which item list a matched selection-scope foreach block iterates: 'rows' for
+// `selection.foreach`/`selection.foreach product(s)`/`products.foreach` (the selection's products,
+// variant-expanded -- unchanged from always-existing behavior), 'notes' for
+// `notes.foreach`/`selection.foreach note(s)`, 'object' (new) for `selection.foreach object(s)`
+// (products then notes, combined).
+type SelectionScopeForeachKind = 'rows' | 'notes' | 'object';
+
+interface SelectionScopeForeachMatch extends TaggedBlock {
+  kind: SelectionScopeForeachKind;
 }
 
-function findForeachBlock(body: string, fromIndex: number): ForeachMatch | null {
-  // Accept both the singular `product` and plural `products` keyword so templates written with
-  // either form (including older templates or hand-typed loops) are detected. The `s?` makes the
-  // trailing `s` optional; `\b` ensures we don't match e.g. `productX`.
-  const openRegex = /\{\{\s*#selection\.foreach\s+products?\b/g;
-  openRegex.lastIndex = fromIndex;
-  const openMatch = openRegex.exec(body);
-  if (!openMatch) return null;
-  const blockStart = openMatch.index;
-  // The opening tag ends at its matching `}}` (params may contain nested {{ }}).
-  const openTagEnd = findMatchingClose(body, blockStart);
-  if (openTagEnd === -1) return null;
-  // params = text after the `#selection.foreach product(s)` keyword up to the closing `}}` (exclusive).
-  const params = body.slice(openMatch.index + openMatch[0].length, openTagEnd - 2);
-  // Find the matching closing tag after the opening tag. The closing keyword may also be singular or
-  // plural, and does not need to match the opening tag's form.
-  const closeRegex = /\{\{\s*\/selection\.foreach\s+products?\s*\}\}/g;
-  closeRegex.lastIndex = openTagEnd;
-  const closeMatch = closeRegex.exec(body);
-  if (!closeMatch) return null;
-  const inner = body.slice(openTagEnd, closeMatch.index);
-  const blockEnd = closeMatch.index + closeMatch[0].length;
-  return { params, inner, blockStart, blockEnd };
+// Locate the first selection-scope foreach opening tag (of any of the three top-level spellings
+// above) in the (comment-stripped) body at or after `fromIndex`, whichever starts earliest --
+// mirroring findNextRenderBlock's earliest-candidate-wins pattern below. Each spelling is routed
+// through findTaggedBlock independently, which (unlike the single-hand-rolled-close-match this
+// replaces) DOES correctly track same-tag nesting depth -- so a `selection.foreach` nested inside
+// another `selection.foreach` now closes against its OWN matching close tag instead of the first
+// `{{/selection.foreach}}` found anywhere after it, which previously closed the OUTER block
+// prematurely with no error, silently producing wrong output (found session 6, alongside the
+// notation cleanup -- this bug existed independently of it and is fixed the same way regardless).
+function findSelectionScopeForeachBlock(
+  body: string,
+  fromIndex: number,
+): SelectionScopeForeachMatch | null {
+  const candidates: SelectionScopeForeachMatch[] = [];
+  const selectionBlock = findTaggedBlock(
+    body,
+    fromIndex,
+    SELECTION_FOREACH_OPEN_SOURCE,
+    SELECTION_FOREACH_CLOSE_SOURCE,
+  );
+  if (selectionBlock) {
+    // Read back the label slot's keyword (see SELECTION_FOREACH_KEYWORD_REGEX) to dispatch kind --
+    // any word other than the six recognized ones (or no word at all) keeps today's meaning:
+    // products only.
+    const openTagText = body.slice(selectionBlock.blockStart, selectionBlock.innerStart);
+    const keyword = openTagText.match(SELECTION_FOREACH_KEYWORD_REGEX)?.[1]?.toLowerCase();
+    const kind: SelectionScopeForeachKind =
+      keyword === 'object' || keyword === 'objects'
+        ? 'object'
+        : keyword === 'note' || keyword === 'notes'
+          ? 'notes'
+          : 'rows';
+    candidates.push({ ...selectionBlock, kind });
+  }
+  const productsBlock = findTaggedBlock(
+    body,
+    fromIndex,
+    PRODUCTS_FOREACH_OPEN_SOURCE,
+    PRODUCTS_FOREACH_CLOSE_SOURCE,
+  );
+  if (productsBlock) candidates.push({ ...productsBlock, kind: 'rows' });
+  const notesBlock = findTaggedBlock(body, fromIndex, NOTES_FOREACH_OPEN_SOURCE, NOTES_FOREACH_CLOSE_SOURCE);
+  if (notesBlock) candidates.push({ ...notesBlock, kind: 'notes' });
+  if (candidates.length === 0) return null;
+  return candidates.reduce((earliest, candidate) =>
+    candidate.blockStart < earliest.blockStart ? candidate : earliest,
+  );
 }
 
 // Determine which rows a foreach block should iterate over given skip options. Operates on the
@@ -2935,15 +3212,39 @@ function foreachSelection(
   return rows.slice(start, end);
 }
 
-// Expand every foreach block in `body` against `iterationRows`, offsetting the loop counter by
-// `counterOffset` (used when a chunked file continues counting from a previous file). `rowSlicer`,
-// when provided, maps a block's full iterated rows to the subset this file should render (used for
-// chunking the FIRST foreach block only); other blocks render all their iterated rows. Returns the
-// body with all foreach blocks replaced by their rendered iterations. Uses a brace-depth-aware
-// scanner so foreach tag params may contain {{ }} tokens.
+// Expand every selection-scope foreach block (`selection.foreach` / `products.foreach` /
+// `notes.foreach`) in `body`. `contextRows` (products, variant-expanded) drives the first two
+// spellings, unchanged from always-existing behavior; `notes` (each wrapped via
+// noteToPseudoProduct) drives the new `notes.foreach` spelling -- see
+// findSelectionScopeForeachBlock's comment for why these are three separate tag pairs rather than
+// one. `chunkFirstBlock`, when set, slices the FIRST selection-scope block found (of EITHER item
+// list) to the given chunk window (used when a chunked file continues counting from a previous
+// file); every other block renders its full iterated list. Returns the body with all matched blocks
+// replaced by their rendered iterations. Uses a brace-depth-aware scanner so foreach tag params may
+// contain {{ }} tokens. A plain imperative loop (not .map().join()) so `{{ break }}` in a block's
+// inner content can stop that block's iteration early -- see BREAK_SENTINEL's comment; `{{ skip }}`
+// discards just the current iteration and continues.
+// The item list a selection-scope foreach match actually iterates, per its dispatched kind (see
+// SelectionScopeForeachKind's comment): 'rows' -- the selection's products (variant-expanded,
+// unchanged from always-existing behavior); 'notes' -- the selection's free-standing notes, each
+// wrapped via noteToPseudoProduct; 'object' (new, session 7) -- products THEN notes, combined, in
+// that order (mirroring the 'object' fileBreak mode's own ordering). Shared by expandForeachBlocks,
+// firstForeachChunkSize, and firstForeachIteratedCount so the three stay in agreement.
+function itemListForForeachKind(
+  kind: SelectionScopeForeachKind,
+  contextRows: ProductData[],
+  notes: SelectionEntry[],
+): ProductData[] {
+  const notesAsRows = () => notes.map((n) => noteToPseudoProduct(n));
+  if (kind === 'notes') return notesAsRows();
+  if (kind === 'object') return [...contextRows, ...notesAsRows()];
+  return contextRows;
+}
+
 function expandForeachBlocks(
   body: string,
   contextRows: ProductData[],
+  notes: SelectionEntry[],
   baseCtx: EvalContext,
   chunkFirstBlock: { size: number; fileIndex: number } | null,
 ): string {
@@ -2951,21 +3252,22 @@ function expandForeachBlocks(
   let cursor = 0;
   let seenFirstBlock = false;
   while (cursor < body.length) {
-    const match = findForeachBlock(body, cursor);
+    const match = findSelectionScopeForeachBlock(body, cursor);
     if (!match) {
       result += body.slice(cursor);
       break;
     }
     result += body.slice(cursor, match.blockStart);
     const opts = parseForeachOptions(match.params);
-    const firstRow = contextRows[0];
-    const startBase = resolveExprToNumber(opts.startExpr, firstRow, contextRows, baseCtx) ?? 0;
+    const itemList = itemListForForeachKind(match.kind, contextRows, notes);
+    const resolveContext = itemList[0] ?? contextRows[0];
+    const startBase = resolveExprToNumber(opts.startExpr, resolveContext, contextRows, baseCtx) ?? 0;
     const startIndex = Math.round(startBase);
-    let iterated = foreachSelection(contextRows, opts.skipFirst, opts.skipLast);
+    let iterated = foreachSelection(itemList, opts.skipFirst, opts.skipLast);
     let counterBase = startIndex;
     const isFirstBlock = !seenFirstBlock;
     seenFirstBlock = true;
-    // Chunk only the first foreach block, and only when chunking is active for this render.
+    // Chunk only the first selection-scope block found, and only when chunking is active.
     if (isFirstBlock && chunkFirstBlock) {
       const from = chunkFirstBlock.fileIndex * chunkFirstBlock.size;
       const to = from + chunkFirstBlock.size;
@@ -2975,39 +3277,56 @@ function expandForeachBlocks(
       // up to at most START + size - 1 -- effectively `i` mod the chunk size within each file.
       counterBase = startIndex;
     }
-    const rendered = iterated
-      .map((row, iterationIndex) => {
-        // First iteration takes the declared start value; every later iteration performs
-        // `name = name + 1` against the CURRENT stored value, so a nested loop that writes the same
-        // variable carries its count forward into this loop's next iteration.
-        const counterValue =
-          iterationIndex === 0 ? counterBase : readVarNumber(baseCtx.vars, opts.name) + 1;
-        baseCtx.vars[opts.name] = String(counterValue);
-        return renderTokens(match.inner, row, contextRows, baseCtx);
-      })
-      .join('');
+    let rendered = '';
+    for (let iterationIndex = 0; iterationIndex < iterated.length; iterationIndex++) {
+      // First iteration takes the declared start value; every later iteration performs
+      // `name = name + 1` against the CURRENT stored value, so a nested loop that writes the same
+      // variable carries its count forward into this loop's next iteration.
+      const counterValue =
+        iterationIndex === 0 ? counterBase : readVarNumber(baseCtx.vars, opts.name) + 1;
+      baseCtx.vars[opts.name] = String(counterValue);
+      // Recursively expand any NESTED selection-scope foreach block within THIS block's own inner
+      // text (against the same contextRows/notes -- a nested loop over "the selection" still means
+      // the same top-level selection, not something row-scoped) before rendering it for this
+      // iteration. Done INSIDE the loop, not hoisted above it, so a nested block's own start/max
+      // params can correctly reference the outer loop's just-set counter for THIS iteration. Fixing
+      // findSelectionScopeForeachBlock's nesting-depth tracking (see its comment) alone was not
+      // sufficient to make e.g. `selection.foreach` nested inside `selection.foreach` actually
+      // iterate -- it only got the OUTER block's bounds right; verified via real-JS end-to-end
+      // testing that a self-nested foreach silently rendered its inner block's tags completely raw
+      // (same symptom class as the session-6 regex bug) until this recursive expansion was added.
+      // A no-op scan (cheap) for the overwhelmingly common non-nested case, since
+      // findSelectionScopeForeachBlock finds nothing and returns match.inner unchanged.
+      const expandedInner = expandForeachBlocks(match.inner, contextRows, notes, baseCtx, null);
+      const iterationText = renderTokens(expandedInner, iterated[iterationIndex], contextRows, baseCtx);
+      const signal = loopControlSignal(iterationText);
+      if (!signal.discard) rendered += iterationText;
+      if (signal.stop) break;
+    }
     result += rendered;
     cursor = match.blockEnd;
   }
   return result;
 }
 
-// Read the chunk size (max) declared on the FIRST foreach block that declares one, resolving its
-// maxExpr against the given rows/context. Returns a positive integer chunk size, or null when no
-// foreach declares a valid (> 0) max.
+// Read the chunk size (max) declared on the FIRST selection-scope foreach block that declares one,
+// resolving its maxExpr against the given rows/context. Returns a positive integer chunk size, or
+// null when no such block declares a valid (> 0) max.
 function firstForeachChunkSize(
   body: string,
   contextRows: ProductData[],
+  notes: SelectionEntry[],
   baseCtx: EvalContext,
 ): number | null {
   let cursor = 0;
   while (cursor < body.length) {
-    const match = findForeachBlock(body, cursor);
+    const match = findSelectionScopeForeachBlock(body, cursor);
     if (!match) return null;
     const opts = parseForeachOptions(match.params);
     if (opts.maxExpr.trim() !== '') {
-      const firstRow = contextRows[0];
-      const maxVal = resolveExprToNumber(opts.maxExpr, firstRow, contextRows, baseCtx);
+      const itemList = itemListForForeachKind(match.kind, contextRows, notes);
+      const resolveContext = itemList[0] ?? contextRows[0];
+      const maxVal = resolveExprToNumber(opts.maxExpr, resolveContext, contextRows, baseCtx);
       if (maxVal != null) {
         const size = Math.round(maxVal);
         return size > 0 ? size : null;
@@ -3019,13 +3338,19 @@ function firstForeachChunkSize(
   return null;
 }
 
-// Count how many rows the FIRST foreach block iterates over (after skip filtering), used to decide
-// whether the row count exceeds the chunk size. Returns 0 when there is no foreach block.
-function firstForeachIteratedCount(body: string, contextRows: ProductData[]): number {
-  const match = findForeachBlock(body, 0);
+// Count how many items the FIRST selection-scope foreach block iterates over (after skip
+// filtering), used to decide whether the count exceeds the chunk size. Returns 0 when there is no
+// such block.
+function firstForeachIteratedCount(
+  body: string,
+  contextRows: ProductData[],
+  notes: SelectionEntry[],
+): number {
+  const match = findSelectionScopeForeachBlock(body, 0);
   if (!match) return 0;
   const opts = parseForeachOptions(match.params);
-  return foreachSelection(contextRows, opts.skipFirst, opts.skipLast).length;
+  const itemList = itemListForForeachKind(match.kind, contextRows, notes);
+  return foreachSelection(itemList, opts.skipFirst, opts.skipLast).length;
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -3039,6 +3364,7 @@ function firstForeachIteratedCount(body: string, contextRows: ProductData[]): nu
 function planCombined(
   body: string,
   products: ProductData[],
+  notes: SelectionEntry[],
   selectionLength: number,
   primaryDomain: string,
   date: DateParts,
@@ -3053,8 +3379,8 @@ function planCombined(
     vars: createVarStore(),
   };
 
-  const chunkSize = firstForeachChunkSize(withoutComments, rows, probeCtx);
-  const iteratedCount = firstForeachIteratedCount(withoutComments, rows);
+  const chunkSize = firstForeachChunkSize(withoutComments, rows, notes, probeCtx);
+  const iteratedCount = firstForeachIteratedCount(withoutComments, rows, notes);
   const chunked = chunkSize != null && iteratedCount > chunkSize;
   const fileCount = chunked ? Math.ceil(iteratedCount / (chunkSize as number)) : 1;
 
@@ -3068,7 +3394,7 @@ function planCombined(
       vars: createVarStore(),
     };
     const chunk = chunked && fileIndex != null ? { size: chunkSize as number, fileIndex } : null;
-    const expanded = expandForeachBlocks(withoutComments, rows, baseCtx, chunk);
+    const expanded = expandForeachBlocks(withoutComments, rows, notes, baseCtx, chunk);
     const substituted = renderTokens(expanded, first, rows, baseCtx);
     // restoreWhitespaceTokens is the LAST step: turn any remaining whitespace sentinels (outside wrap
     // blocks) into real newlines / spaces.
@@ -3102,7 +3428,13 @@ function evaluateSingle(
     date,
     vars: createVarStore(),
   };
-  const expanded = expandForeachBlocks(preparedBody, [row], baseCtx, null);
+  // Selection-scope loops iterate the WHOLE selection, which a single-row per-unit render doesn't
+  // have (see planOutputFiles' non-'selection' branches -- each output file here IS one row). A
+  // stray `selection.foreach`/`products.foreach` in a per-unit template iterates just that one row,
+  // unchanged from always-existing behavior; `notes.foreach` has nothing to iterate here (there is
+  // no selection-wide notes list threaded into per-unit rendering) and simply renders zero times --
+  // not a regression, since this combination was never possible before this session either.
+  const expanded = expandForeachBlocks(preparedBody, [row], [], baseCtx, null);
   const substituted = renderTokens(expanded, row, [row], baseCtx);
   // restoreWhitespaceTokens is the LAST step: turn any remaining whitespace sentinels (outside wrap
   // blocks) into real newlines / spaces.
@@ -3333,9 +3665,9 @@ interface FilePlan {
 // so it can be rendered through the exact same pipeline as a real product/variant row. Every
 // product/variant-level field resolves to '' (matching the rule that a product/variant-level detail
 // queried on a note returns an empty string), except `.note`, which carries the note's own text --
-// so a template reads a note's content through the EXISTING {{ product.notes }} token (alias
-// {{ product.note }}) with no new template syntax, and every other {{ product.* }}/{{ variant.* }}
-// token resolves to '' the same way it already does for any unset field.
+// so a template reads a note's content through the EXISTING {{ product.note }} token with no new
+// template syntax, and every other {{ product.* }}/{{ variant.* }} token resolves to '' the same way
+// it already does for any unset field.
 function noteToPseudoProduct(entry: SelectionEntry): ProductData {
   return {
     id: entry.id,
@@ -3426,10 +3758,30 @@ function planOutputFiles(
   templateExtension: string,
   products: ProductData[],
   notes: SelectionEntry[],
-  fileBreak: FileBreak,
+  fileBreak: FileBreak | null,
   primaryDomain: string,
   now: Date,
 ): FilePlan {
+  // Session 7, per explicit direction: a template whose fileBreak was never explicitly chosen (a
+  // template saved before session 4, never opened and resaved since) is no longer guessed -- see
+  // mapStoredTemplate. Refuse clearly rather than silently picking one. `count: 1` (not 0) is
+  // deliberate: both the download-preparation effect and the preview memo treat a plan with no
+  // files as "nothing to build, do nothing" (the same shape an empty selection already produces) and
+  // would otherwise silently show neither a file nor an error -- count:1 guarantees `build` actually
+  // gets called once, so the throw reaches their existing try/catch and surfaces the usual "could
+  // not be generated" banner instead of nothing happening at all.
+  if (fileBreak === null) {
+    return {
+      count: 1,
+      zipName: null,
+      build: () => {
+        throw new Error(
+          'This template has no file break selected. Open it in the editor and choose one under ' +
+            'File break before downloading or previewing it.',
+        );
+      },
+    };
+  }
   const ext = sanitizeExtension(templateExtension);
   const titleSlug = slugify(templateTitle);
   const dateParts = computeDateParts(now);
@@ -3444,6 +3796,7 @@ function planOutputFiles(
     const combined = planCombined(
       templateBody,
       products,
+      notes,
       selectionLength,
       primaryDomain,
       dateParts,
@@ -3540,7 +3893,7 @@ function buildOutputFiles(
   templateExtension: string,
   products: ProductData[],
   notes: SelectionEntry[],
-  fileBreak: FileBreak,
+  fileBreak: FileBreak | null,
   primaryDomain: string,
   now: Date,
 ): OutputFiles {
@@ -3924,8 +4277,16 @@ function Extension() {
   const [editorTitle, setEditorTitle] = useState('');
   const [editorBody, setEditorBody] = useState('');
   const [editorExtension, setEditorExtension] = useState('txt');
-  const [editorFileBreak, setEditorFileBreak] = useState<FileBreak>('variant');
+  // `null` means "not yet chosen" -- for a BRAND NEW template this is just the initial value of a UI
+  // control (not inference; the merchant is free to change it before Save, same as any other
+  // dropdown default), defaulted to 'variant' below in openNewTemplate. Opening an EXISTING template
+  // whose stored fileBreak is null (never explicitly chosen -- see TemplateData.fileBreak) leaves it
+  // null here too, so the dropdown visibly shows "not set" rather than silently substituting a
+  // guess; saveTemplate refuses to save while this is null (see editorFileBreakError), same
+  // enforcement as the Title field.
+  const [editorFileBreak, setEditorFileBreak] = useState<FileBreak | null>('variant');
   const [editorTitleError, setEditorTitleError] = useState<string | null>(null);
+  const [editorFileBreakError, setEditorFileBreakError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // Placeholder token that authors type into the body to mark where a variable should go.
@@ -3938,7 +4299,7 @@ function Extension() {
     title: string;
     body: string;
     extension: string;
-    fileBreak: FileBreak;
+    fileBreak: FileBreak | null;
   }>({
     title: '',
     body: '',
@@ -3966,7 +4327,7 @@ function Extension() {
   // Preview: which generated file the preview modal is currently showing (0-based).
   const [previewIndex, setPreviewIndex] = useState<number>(0);
 
-  // The selected products with their current notes attached, so {{ product.notes }} resolves during
+  // The selected products with their current notes attached, so {{ product.note }} resolves during
   // download and preview generation and notes travel with a product into any selection, and with
   // `.variants` narrowed to whichever subset is checked in selectedVariantIds (see
   // narrowToSelectedVariants -- absent/full-coverage entries are a no-op, so this list is unaffected
@@ -4553,6 +4914,7 @@ function Extension() {
     setEditorExtension('txt');
     setEditorFileBreak('variant');
     setEditorTitleError(null);
+    setEditorFileBreakError(null);
     setEditorError(null);
     originalEditorRef.current = { title: '', body: '', extension: 'txt', fileBreak: 'variant' };
     setView('editor');
@@ -4563,8 +4925,11 @@ function Extension() {
     setEditorTitle(tpl.title);
     setEditorBody(tpl.body);
     setEditorExtension(tpl.extension || 'txt');
+    // `tpl.fileBreak` may be null (never explicitly chosen -- see TemplateData.fileBreak); left as
+    // null here rather than substituted with a guess, so the dropdown visibly shows "not set".
     setEditorFileBreak(tpl.fileBreak);
     setEditorTitleError(null);
+    setEditorFileBreakError(null);
     setEditorError(null);
     originalEditorRef.current = {
       title: tpl.title,
@@ -4613,7 +4978,14 @@ function Extension() {
       setEditorTitleError('Title is required');
       return;
     }
+    // Session 7, per explicit direction: fileBreak must be explicitly chosen -- a null value is
+    // never inferred or silently defaulted at save time, same enforcement as the Title field above.
+    if (editorFileBreak === null) {
+      setEditorFileBreakError('Choose a file break before saving');
+      return;
+    }
     setEditorTitleError(null);
+    setEditorFileBreakError(null);
     setEditorError(null);
     setSaving(true);
     try {
@@ -5410,18 +5782,27 @@ function Extension() {
               <s-stack direction="inline" gap="small" alignItems="center">
                 <s-text type="strong">Body</s-text>
                 <s-text color="subdued">File break:</s-text>
-                <s-button commandFor="file-break-menu">{FILE_BREAK_LABELS[editorFileBreak]}</s-button>
+                <s-button
+                  commandFor="file-break-menu"
+                  tone={editorFileBreak === null ? 'critical' : undefined}
+                >
+                  {editorFileBreak ? FILE_BREAK_LABELS[editorFileBreak] : 'Not set — choose one'}
+                </s-button>
                 <s-menu id="file-break-menu" accessibilityLabel="File break">
                   {FILE_BREAK_VALUES.map((value: FileBreak) => (
                     <s-button
                       key={value}
                       icon={editorFileBreak === value ? 'check' : undefined}
-                      onClick={() => setEditorFileBreak(value)}
+                      onClick={() => {
+                        setEditorFileBreak(value);
+                        setEditorFileBreakError(null);
+                      }}
                     >
                       {FILE_BREAK_LABELS[value]}
                     </s-button>
                   ))}
                 </s-menu>
+                {editorFileBreakError ? <s-text tone="critical">{editorFileBreakError}</s-text> : null}
               </s-stack>
               <s-stack direction="inline" gap="small" alignItems="center">
                 <s-button icon="plus" commandFor="insert-variable-menu">
@@ -5465,6 +5846,7 @@ function Extension() {
                 </s-text>
                 <s-section heading="Selection">
                   <s-button onClick={() => insertVariable(FOREACH_BLOCK)}>For each loop</s-button>
+                  <s-button onClick={() => insertVariable(NOTES_LOOP_BLOCK)}>Notes foreach</s-button>
                   <s-button onClick={() => insertVariable('{{ selection.length }}')}>
                     Number of products selected
                   </s-button>
@@ -5480,6 +5862,7 @@ function Extension() {
                   <s-button onClick={() => insertVariable(VARIANT_LOOP_BLOCK)}>
                     Variant foreach
                   </s-button>
+                  <s-button onClick={() => insertVariable(TAGS_LOOP_BLOCK)}>Tags foreach</s-button>
                 </s-section>
                 <s-section heading="Variables">
                   <s-button onClick={() => insertVariable(ASSIGN_TOKEN)}>Assign variable</s-button>
@@ -5498,6 +5881,8 @@ function Extension() {
                   <s-button onClick={() => insertVariable(INSERT_BLOCK)}>Insert block</s-button>
                   <s-button onClick={() => insertVariable(IF_BLOCK)}>If block</s-button>
                   <s-button onClick={() => insertVariable(COMMENT_BLOCK)}>Comment block</s-button>
+                  <s-button onClick={() => insertVariable(BREAK_TOKEN_BLOCK)}>Break</s-button>
+                  <s-button onClick={() => insertVariable(SKIP_TOKEN_BLOCK)}>Skip</s-button>
                 </s-section>
                 <s-section heading="Functional tokens">
                   <s-button onClick={() => insertVariable('{{ =0 }}')}>Math equation</s-button>
