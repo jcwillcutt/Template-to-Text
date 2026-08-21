@@ -1355,8 +1355,20 @@ function renderTokenContent(
       if (Number.isFinite(value)) {
         return String(value);
       }
-    } catch {
-      // Fall through to the empty / zero result below.
+    } catch (err: any) {
+      // A bare (forgotten-braces) variable reference inside the equation is surfaced as a visible
+      // marker instead of silently rendering nothing, so the mistake is obvious in the output
+      // rather than looking like a data problem. Only safe when plain text can appear here --
+      // inside a NUMERIC context (a chop counter, a foreach chunk size, an insert position, ...)
+      // this still falls back to '0' below, since inserting text there would break whatever numeric
+      // parsing comes next; applyIfBlocks additionally checks for this marker in a condition's
+      // resolved text (numeric=false there too) so a malformed condition doesn't silently pick a
+      // branch based on a broken string comparison.
+      const message = err && typeof err.message === 'string' ? err.message : '';
+      if (!numeric && message.indexOf(UNRESOLVED_VARIABLE_ERROR_PREFIX) === 0) {
+        return unresolvedVariableMarker(message.slice(UNRESOLVED_VARIABLE_ERROR_PREFIX.length));
+      }
+      // Fall through to the empty / zero result below for every other parse failure.
     }
     return numeric ? '0' : '';
   }
@@ -1450,6 +1462,35 @@ function isVariableName(key: string): boolean {
 // + - * / % ^ (exponentiation, right-associative), unary minus, and parentheses. JavaScript `eval`
 // is intentionally NOT used so that `^` means exponentiation rather than bitwise XOR. Throws on any
 // malformed input so callers can catch and render an empty string.
+//
+// A variable is ALWAYS referenced with its own {{ }} inside an equation (e.g. `{{ = {{i}}%4 }}`) --
+// never bare (`{{ = i%4 }}` is invalid). tokenizeMath below specifically detects a bare identifier
+// and throws an error prefixed with UNRESOLVED_VARIABLE_ERROR_PREFIX, naming the identifier; this is
+// caught in exactly two places -- renderTokenContent's math branch and applyIfBlocks -- to surface a
+// visible marker (see unresolvedVariableMarker) in the rendered output instead of silently rendering
+// nothing or (worse, inside an {{ #if=EXPR }} condition) silently always taking whichever branch a
+// broken string comparison happens to land on.
+const UNRESOLVED_VARIABLE_ERROR_PREFIX = 'UNRESOLVED_VARIABLE:';
+
+// The visible marker rendered in place of a failed equation/condition when the failure was
+// specifically an unresolved bare variable reference (see UNRESOLVED_VARIABLE_ERROR_PREFIX above).
+// Deliberately contains NO literal `{{`/`}}` characters: this text can end up back inside a larger
+// string that gets fed through another render pass (applyIfBlocks' own output is re-scanned by
+// renderTokens right after it runs) -- a `{{ name }}` written INTO the marker as a "here's the fix"
+// example would itself be resolved on that second pass and silently replaced by name's actual
+// value, corrupting the very message meant to explain the mistake. Spelling the fix out in words
+// instead avoids that trap entirely.
+function unresolvedVariableMarker(name: string): string {
+  return `[[ unresolved variable "${name}" in equation -- wrap it in double curly braces ]]`;
+}
+
+// Whether an already-rendered string contains an unresolvedVariableMarker (used by applyIfBlocks to
+// detect that part of a condition never actually evaluated, rather than proceeding to compare a
+// broken string and silently picking a branch).
+function containsUnresolvedVariableMarker(text: string): boolean {
+  return text.includes('unresolved variable "');
+}
+
 type MathToken = { type: 'num'; value: number } | { type: 'op'; value: string };
 
 function tokenizeMath(input: string): MathToken[] {
@@ -1478,6 +1519,21 @@ function tokenizeMath(input: string): MathToken[] {
       tokens.push({ type: 'op', value: ch });
       i += 1;
       continue;
+    }
+    // A run of letters/digits/underscore that isn't a valid number is almost always a variable
+    // reference the author forgot to wrap in its own {{ }} -- e.g. `{{ = i%4 }}` instead of the
+    // correct `{{ = {{i}}%4 }}`. A genuine variable's VALUE is always substituted to a plain number
+    // by renderTemplateText before this tokenizer ever runs (see renderTokenContent's math branch),
+    // so an identifier can only reach here by mistake. Thrown with a distinctive, parseable message
+    // (UNRESOLVED_VARIABLE_ERROR_PREFIX) so callers can surface a specific, actionable error instead
+    // of silently rendering nothing -- see renderTokenContent and applyIfBlocks.
+    if (/[A-Za-z_]/.test(ch)) {
+      let ident = '';
+      while (i < input.length && /[A-Za-z0-9_]/.test(input[i])) {
+        ident += input[i];
+        i += 1;
+      }
+      throw new Error(UNRESOLVED_VARIABLE_ERROR_PREFIX + ident);
     }
     throw new Error('Unexpected character in equation');
   }
@@ -2412,6 +2468,16 @@ function applyIfBlocks(
     // equations to their numeric results (so equations work inside conditions), then resolve any
     // remaining plain {{ ... }} tokens to their raw string values.
     const resolvedCondition = renderTemplateText(match.condition, product, list, ctx, false);
+    // A resolved condition that still carries an unresolvedVariableMarker means part of the
+    // condition never actually evaluated (a forgotten-braces variable reference inside a nested
+    // equation -- see renderTokenContent's math branch). Rendering that marker directly, instead of
+    // proceeding to a boolean comparison that would silently succeed against the marker text as a
+    // plain string, makes the failure visible right where the if-block's output would have gone.
+    if (containsUnresolvedVariableMarker(resolvedCondition)) {
+      result += resolvedCondition;
+      cursor = match.blockEnd;
+      continue;
+    }
     let branch = '';
     try {
       branch = evaluateBooleanExpression(resolvedCondition)
