@@ -1,0 +1,3 @@
+url1,serial1,loc1,url2,serial2,loc2,url3,serial3,loc3,url4,serial4,loc4{{#selection.foreach product, i=0}}{{#comment}}
+**TO GET 4 PRODUCTS PER ROW, DO MOD ARITHMETIC AND EITHER CREATE NEW LINE IF 4th OR A COMMA IF ADDING PRODUCT to ROW**
+{{/comment}}{{ #if={{ = {{ i }}%4 }} == 0 }}{{ \n }}{{ #else }},{{ /if }}https://website.com/products/{{ product.handle }},{{ product.metafield.productspecs.serial }},{{ product.metafield.custom.location }}{{/selection.foreach product}}
