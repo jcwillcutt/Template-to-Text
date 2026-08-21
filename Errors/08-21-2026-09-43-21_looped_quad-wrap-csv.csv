@@ -1,0 +1,4 @@
+url1,serial1,loc1,url2,serial2,loc2,url3,serial3,loc3,url4,serial4,loc4{{ #if={{ = {{ i }}%4 }} == 0 }}
+{{ #else }},{{ /if }}https://website.com/products/epiphone-30-5-bar-stool,,{{ #if={{ = {{ i }}%4 }} == 0 }}
+{{ #else }},{{ /if }}https://website.com/products/30-premium-playing-stool,,{{ #if={{ = {{ i }}%4 }} == 0 }}
+{{ #else }},{{ /if }}https://website.com/products/taylor-24-bar-stool,,
