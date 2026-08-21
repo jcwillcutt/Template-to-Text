@@ -4127,6 +4127,33 @@ function selectionSignature(list: ProductData[], notes: SelectionEntry[] = []): 
   );
 }
 
+// One row of a combined product+note selection table (session 8) -- a discriminated union so the
+// Selection view can render one table interleaving both kinds instead of two separate ones,
+// ordered by orderIndex (see currentSelectionOrderIndex's comment for why order lives in a separate
+// per-id map rather than on the item itself).
+type SelectionRow =
+  | { kind: 'product'; id: string; product: ProductData }
+  | { kind: 'note'; id: string; note: SelectionEntry };
+
+// Merge a product list and a note-entry list into one array of SelectionRow, sorted by orderIndex
+// (an id with no entry sorts LAST, stably preserving its existing relative position among other
+// unordered ids -- see currentSelectionOrderIndex's comment on why that degradation is preferable to
+// an item going missing).
+function combineSelectionRows(
+  products: ProductData[],
+  notes: SelectionEntry[],
+  orderIndex: Record<string, number>,
+): SelectionRow[] {
+  const rows: SelectionRow[] = [
+    ...products.map((product): SelectionRow => ({ kind: 'product', id: product.id, product })),
+    ...notes.map((note): SelectionRow => ({ kind: 'note', id: note.id, note })),
+  ];
+  return rows
+    .map((row, index) => ({ row, index, order: orderIndex[row.id] ?? Infinity }))
+    .sort((a, b) => a.order - b.order || a.index - b.index)
+    .map((entry) => entry.row);
+}
+
 // ----------------------------------------------------------------------------------------------
 // GRAPHQL RESPONSE HELPERS
 // ----------------------------------------------------------------------------------------------
@@ -4179,6 +4206,26 @@ function Extension() {
   // meaning an absent/empty SelectionEntry.variantIds already has, so this maps directly onto that
   // stored field with no extra translation. In-memory only, like productNotes.
   const [selectedVariantIds, setSelectedVariantIds] = useState<Record<string, string[]>>({});
+  // The Current Selection's combined product+note add-order, by id -- session 8, per explicit
+  // direction ("show objects in the order added to the selection"). Neither `selectedProducts` (a
+  // map) nor `noteObjects` (its own array) individually carries this, since a product and a note
+  // added interleaved in time live in two separate collections with no shared ordering signal
+  // between them. Deliberately a per-id SEQUENCE NUMBER map, not an order array that would need
+  // splicing kept in sync on every add/remove: a forgotten update site here just leaves that id's
+  // number unset, and unset sorts LAST alongside everything else unset (still visible, only
+  // possibly mis-positioned) -- an order array's equivalent failure (forgetting to append on some
+  // add path) would make that item invisible from the combined view entirely, a much worse
+  // degradation for a value with several separate call sites that all need to stay in sync.
+  // `currentSelectionOrderCounter` is a ref (not state) since bumping it must never itself trigger a
+  // re-render -- only the map assignments that read it do.
+  const currentSelectionOrderCounter = useRef<number>(0);
+  const [currentSelectionOrderIndex, setCurrentSelectionOrderIndex] = useState<
+    Record<string, number>
+  >({});
+  const nextSelectionOrderIndex = (): number => {
+    currentSelectionOrderCounter.current += 1;
+    return currentSelectionOrderCounter.current;
+  };
   // Which bulk-select button is currently active, if any. Only one can be active at a time.
   const [bulkMode, setBulkMode] = useState<BulkSelectMode | null>(null);
   // Persistent map of EVERY product returned by any products query this session (initial load, each
@@ -4211,6 +4258,21 @@ function Extension() {
     public_5: [],
     public_6: [],
   });
+  // Each public slot's stored combined product+note order, by id (session 8) -- see
+  // currentSelectionOrderIndex's comment for why this is a per-id sequence-number map rather than an
+  // order array. Populated in loadSelections from the stored array's own order (which already
+  // interleaves products and notes exactly as they were last saved), consumed by openSelectionView
+  // to seed the selection view's combined ordering for a public slot.
+  const [selectionSlotOrderIndex, setSelectionSlotOrderIndex] = useState<
+    Record<PublicSelectionSlotId, Record<string, number>>
+  >({
+    public_1: {},
+    public_2: {},
+    public_3: {},
+    public_4: {},
+    public_5: {},
+    public_6: {},
+  });
   // Free-standing note entries belonging to the Current Selection (in memory only until saved into
   // a slot). "noteObjects" is a holdover name from when these were a distinct NoteObject type --
   // they are plain SelectionEntry values now (id is a generated placeholder, not a product id).
@@ -4234,6 +4296,11 @@ function Extension() {
   const [selectionsError, setSelectionsError] = useState<string | null>(null);
   const [selectionSlot, setSelectionSlot] = useState<SelectionSlotId | null>(null);
   const [selectionDraft, setSelectionDraft] = useState<ProductData[]>([]);
+  // The OPEN selection's own combined product+note order, by id -- seeded on openSelectionView from
+  // currentSelectionOrderIndex ('current') or selectionSlotOrderIndex[slot] (a public slot), and
+  // extended (via nextSelectionOrderIndex) whenever addMainSelectionToDraft merges more items in.
+  // Session 8 -- see currentSelectionOrderIndex's comment for the map-not-array reasoning.
+  const [selectionViewOrderIndex, setSelectionViewOrderIndex] = useState<Record<string, number>>({});
   const [selectionBaseline, setSelectionBaseline] = useState<string>('');
   const [selectionSearch, setSelectionSearch] = useState('');
   const [selectionLoading, setSelectionLoading] = useState(false);
@@ -4661,12 +4728,25 @@ function Extension() {
       };
       const productEntries: Record<string, SelectionEntry[]> = {};
       const noteEntries: Record<string, SelectionEntry[]> = {};
+      // The stored array's own order (bySlot[slot]) already interleaves products and notes exactly
+      // as they were last saved -- captured here, per id, so the selection view can render/reorder
+      // them combined instead of two always-products-then-notes tables (session 8). This does NOT
+      // change productEntries/noteEntries themselves (still split, same as before, since a product
+      // entry needs to be fetched by id while a note entry never does) -- it's purely additional
+      // ordering information alongside the existing split.
+      const slotOrderIndex: Record<string, Record<string, number>> = {};
       for (const slot of PUBLIC_SLOTS) {
         productEntries[slot] = bySlot[slot].filter((e) => !isStandaloneNote(e));
         noteEntries[slot] = bySlot[slot].filter(isStandaloneNote);
+        const orderIndex: Record<string, number> = {};
+        bySlot[slot].forEach((e, i) => {
+          orderIndex[e.id] = i;
+        });
+        slotOrderIndex[slot] = orderIndex;
       }
       setSelectionEntries(productEntries);
       setSelectionNotes(noteEntries);
+      setSelectionSlotOrderIndex(slotOrderIndex as Record<PublicSelectionSlotId, Record<string, number>>);
       setSelectionSubtitles(parseSubtitles(shop?.subs?.value));
     } catch (err: any) {
       setSelectionsError(err?.message || 'Failed to load saved selections.');
@@ -4745,7 +4825,12 @@ function Extension() {
       setNoteDraftText('');
       return;
     }
-    setNoteObjects((prev) => [...prev, createNoteEntry(note)]);
+    const entry = createNoteEntry(note);
+    setNoteObjects((prev) => [...prev, entry]);
+    setCurrentSelectionOrderIndex((prev: Record<string, number>) => ({
+      ...prev,
+      [entry.id]: nextSelectionOrderIndex(),
+    }));
     setNoteDraftText('');
   };
 
@@ -4775,6 +4860,12 @@ function Extension() {
       }
       return next;
     });
+    if (checked) {
+      setCurrentSelectionOrderIndex((prev: Record<string, number>) => ({
+        ...prev,
+        [product.id]: nextSelectionOrderIndex(),
+      }));
+    }
     // Unchecking a product on the main page deletes its note and its variant subset from the
     // current selection: neither exists once the product is no longer selected. A note or variant
     // subset already saved into a public selection is stored separately and is not affected.
@@ -4875,6 +4966,15 @@ function Extension() {
       // preparation effect are not restarted for no reason.
       return changed ? next : prev;
     });
+    if (selected) {
+      setCurrentSelectionOrderIndex((prev: Record<string, number>) => {
+        const additions = list.filter((p) => !(p.id in prev));
+        if (additions.length === 0) return prev;
+        const next = { ...prev };
+        for (const p of additions) next[p.id] = nextSelectionOrderIndex();
+        return next;
+      });
+    }
   };
 
   // Toggle one of the two bulk-select buttons. Pressing the active button again clears exactly the
@@ -4898,6 +4998,9 @@ function Extension() {
     setSelectedProducts({});
     setProductNotes({});
     setSelectedVariantIds({});
+    // No need to touch currentSelectionOrderIndex: it's only ever consulted for ids that are
+    // actually present in selectedProducts/noteObjects (the real source of truth for what's
+    // selected), so a now-cleared product's leftover entry there is inert, not stale-and-wrong.
   };
 
   // --------------------------------------------------------------------------------------------
@@ -5377,6 +5480,7 @@ function Extension() {
     if (slot === 'current') {
       setSelectionDraft(selectedProductList);
       setSelectionNoteDraft(noteObjects);
+      setSelectionViewOrderIndex(currentSelectionOrderIndex);
       setSelectionBaseline(selectionSignature(selectedProductList, noteObjects));
       setSubtitleDraft('');
       setSubtitleBaseline('');
@@ -5385,6 +5489,7 @@ function Extension() {
     const storedEntries = selectionEntries[slot] || [];
     const storedNotes = selectionNotes[slot] || [];
     setSelectionNoteDraft(storedNotes);
+    setSelectionViewOrderIndex(selectionSlotOrderIndex[slot] || {});
     const storedSubtitle = selectionSubtitles[slot] || '';
     setSubtitleDraft(storedSubtitle);
     setSubtitleBaseline(storedSubtitle);
@@ -5532,12 +5637,23 @@ function Extension() {
     if (noteAdditions.length > 0) {
       setSelectionNoteDraft([...selectionNoteDraft, ...noteAdditions]);
     }
+    // Newly-merged items join the END of this view's combined order -- "added to the selection"
+    // (session 8), same as any other add.
+    if (additions.length > 0 || noteAdditions.length > 0) {
+      setSelectionViewOrderIndex((prev: Record<string, number>) => {
+        const next = { ...prev };
+        for (const p of additions) next[p.id] = nextSelectionOrderIndex();
+        for (const n of noteAdditions) next[n.id] = nextSelectionOrderIndex();
+        return next;
+      });
+    }
   };
 
   const clearSelectionDraft = (): void => {
     setSelectionError(null);
     setSelectionDraft([]);
     setSelectionNoteDraft([]);
+    setSelectionViewOrderIndex({});
   };
 
   const selectionSubtitleFor = (slot: PublicSelectionSlotId): string =>
@@ -5557,23 +5673,30 @@ function Extension() {
     return `${selectionSlotLabel(slot)} (${count})`;
   };
 
-  // Move ONE product up or down by a single position in the open selection's working draft, so the
-  // merchant can reorder the selection. Polaris has no drag-and-drop component and the sandbox has no
-  // HTML5 drag events, so reordering uses these move controls. The change is a draft edit; it is only
-  // persisted when the merchant uses Save.
-  const moveInSelectionDraft = (productId: string, offset: number): void => {
+  // Move ONE row (product OR note) up or down by a single position in the open selection's combined
+  // order, so the merchant can reorder the selection. Polaris has no drag-and-drop component and the
+  // sandbox has no HTML5 drag events, so reordering uses these move controls. Operates on the FULL
+  // (unfiltered) combined row list, then renumbers every row's order index sequentially from that
+  // result -- simpler and more robust than swapping the two moved rows' existing values in place,
+  // since it also concretely resolves any never-explicitly-ordered ("unset", sorts last) row it
+  // touches into a real position, rather than juggling Infinity. The change is a draft edit; it is
+  // only persisted when the merchant uses Save.
+  const moveSelectionRow = (id: string, offset: number): void => {
     setSelectionError(null);
-    setSelectionDraft((prev) => {
-      const index = prev.findIndex((p) => p.id === productId);
-      const target = index + offset;
-      if (index === -1 || target < 0 || target >= prev.length) {
-        return prev;
-      }
-      const next = [...prev];
-      const [moved] = next.splice(index, 1);
-      next.splice(target, 0, moved);
-      return next;
+    const combined = combineSelectionRows(selectionDraft, selectionNoteDraft, selectionViewOrderIndex);
+    const index = combined.findIndex((row) => row.id === id);
+    const target = index + offset;
+    if (index === -1 || target < 0 || target >= combined.length) {
+      return;
+    }
+    const reordered = [...combined];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(target, 0, moved);
+    const renumbered: Record<string, number> = {};
+    reordered.forEach((row, i) => {
+      renumbered[row.id] = i;
     });
+    setSelectionViewOrderIndex(renumbered);
   };
 
   // Remove ONE product from the open selection's working draft. The change is a draft edit; it is
@@ -5627,6 +5750,26 @@ function Extension() {
       const additions = notesToLoad.filter((n) => !existing.has(n.id));
       return additions.length === 0 ? prev : [...prev, ...additions];
     });
+    // Newly-loaded ids join the end of the Current Selection's combined order; an id already present
+    // keeps its existing position rather than jumping to the end (this loads/refreshes a product or
+    // note's DATA, not necessarily a fresh "add").
+    setCurrentSelectionOrderIndex((prev: Record<string, number>) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const p of productsToLoad) {
+        if (!(p.id in next)) {
+          next[p.id] = nextSelectionOrderIndex();
+          changed = true;
+        }
+      }
+      for (const n of notesToLoad) {
+        if (!(n.id in next)) {
+          next[n.id] = nextSelectionOrderIndex();
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
   };
 
   // Persist the draft. A saved slot writes its product ids to its shop metafield; "Current Selection"
@@ -5649,6 +5792,10 @@ function Extension() {
       setProductNotes(nextNotes);
       setSelectedVariantIds(nextVariantIds);
       setNoteObjects(selectionNoteDraft);
+      // selectionDraft/selectionNoteDraft together become the new selectedProducts/noteObjects
+      // exactly, so the view's own (possibly reordered/edited) order becomes the new Current
+      // Selection order in full, replacing whatever it was before.
+      setCurrentSelectionOrderIndex(selectionViewOrderIndex);
       setSelectionBaseline(selectionSignature(selectionDraft, selectionNoteDraft));
       return;
     }
@@ -5673,6 +5820,15 @@ function Extension() {
           ? { variantIds: p.variants.map((v: VariantData) => v.id) }
           : {}),
       }));
+      // Interleave products and notes in the view's own combined order (session 8) instead of
+      // always products-then-notes, so the STORED array finally preserves true add/display order
+      // for the next time this selection is loaded, not just this session's in-memory view.
+      const entriesById = new Map(entries.map((e) => [e.id, e]));
+      const combinedForStorage: SelectionEntry[] = combineSelectionRows(
+        selectionDraft,
+        selectionNoteDraft,
+        selectionViewOrderIndex,
+      ).map((row) => (row.kind === 'product' ? entriesById.get(row.id)! : row.note));
       const trimmedSubtitle = subtitleDraft.slice(0, SUBTITLE_MAX_LENGTH);
       const nextSubtitles: Record<string, string> = { ...selectionSubtitles };
       if (trimmedSubtitle === '') {
@@ -5688,7 +5844,7 @@ function Extension() {
               namespace: TEMPLATE_NAMESPACE,
               key,
               type: 'json',
-              value: JSON.stringify([...entries, ...selectionNoteDraft]),
+              value: JSON.stringify(combinedForStorage),
             },
             {
               ownerId,
@@ -5707,6 +5863,17 @@ function Extension() {
       }
       setSelectionEntries((prev) => ({ ...prev, [selectionSlot]: entries }));
       setSelectionNotes((prev) => ({ ...prev, [selectionSlot]: selectionNoteDraft }));
+      // Keep this slot's stored-order cache in step with what was just written, from the SAVED
+      // array's own order (recomputed the same way parseSelectionItems would derive it on the next
+      // load, so re-opening this slot without an intervening full reload shows the same order).
+      const savedOrderIndex: Record<string, number> = {};
+      combinedForStorage.forEach((entry, i) => {
+        savedOrderIndex[entry.id] = i;
+      });
+      setSelectionSlotOrderIndex((prev: Record<PublicSelectionSlotId, Record<string, number>>) => ({
+        ...prev,
+        [selectionSlot]: savedOrderIndex,
+      }));
       setSelectionSubtitles(nextSubtitles);
       setSubtitleDraft(trimmedSubtitle);
       setSubtitleBaseline(trimmedSubtitle);
@@ -5725,19 +5892,24 @@ function Extension() {
     setSelectionError(null);
   };
 
-  // Search inside a selection only looks at the products the selection already holds.
-  const selectionFiltered = useMemo<ProductData[]>(() => {
-    const term = selectionSearch.trim();
-    if (term === '') return selectionDraft;
-    return selectionDraft.filter((p) => productMatchesQuery(p, term));
-  }, [selectionDraft, selectionSearch]);
+  // The open selection's products and notes, combined into ONE ordered list (session 8, per
+  // explicit direction: "show objects in the order added to the selection"). Unfiltered -- used to
+  // find a row's true first/last position (for disabling the move-up/move-down controls) regardless
+  // of any active search term.
+  const selectionCombinedAll = useMemo<SelectionRow[]>(
+    () => combineSelectionRows(selectionDraft, selectionNoteDraft, selectionViewOrderIndex),
+    [selectionDraft, selectionNoteDraft, selectionViewOrderIndex],
+  );
 
-  // Searching inside a selection also matches free-standing note entries by their text.
-  const selectionNotesFiltered = useMemo<SelectionEntry[]>(() => {
+  // The same combined list, filtered by the in-selection search term (matches a product's usual
+  // searchable fields or a note's text) -- what the table actually renders.
+  const selectionRowsFiltered = useMemo<SelectionRow[]>(() => {
     const term = selectionSearch.trim();
-    if (term === '') return selectionNoteDraft;
-    return selectionNoteDraft.filter((n) => noteMatchesQuery(n, term));
-  }, [selectionNoteDraft, selectionSearch]);
+    if (term === '') return selectionCombinedAll;
+    return selectionCombinedAll.filter((row: SelectionRow) =>
+      row.kind === 'product' ? productMatchesQuery(row.product, term) : noteMatchesQuery(row.note, term),
+    );
+  }, [selectionCombinedAll, selectionSearch]);
 
   // --------------------------------------------------------------------------------------------
   // View rendering
@@ -6083,7 +6255,7 @@ function Extension() {
                 justifyContent="space-between"
                 alignItems="center"
               >
-                <s-heading>Products in this selection</s-heading>
+                <s-heading>Items in this selection</s-heading>
                 <s-text color="subdued">
                   {selectionDraft.length} products · {selectionNoteDraft.length} notes
                 </s-text>
@@ -6118,10 +6290,14 @@ function Extension() {
             </s-stack>
           </s-box>
 
+          {/* ONE combined table interleaving products and notes, ordered by when each was added to
+              the selection (session 8, per explicit direction) -- replaces the old two separate
+              "Products"/"Notes" tables, which always showed every product before every note
+              regardless of actual add order. */}
           <s-table loading={selectionLoading}>
             <s-table-header-row>
               {isPublicSelection ? <s-table-header>Use</s-table-header> : null}
-              <s-table-header listSlot="primary">Product</s-table-header>
+              <s-table-header listSlot="primary">Item</s-table-header>
               <s-table-header>Handle</s-table-header>
               <s-table-header>Qty</s-table-header>
               <s-table-header>Note</s-table-header>
@@ -6129,13 +6305,13 @@ function Extension() {
               <s-table-header>Remove</s-table-header>
             </s-table-header-row>
             <s-table-body>
-              {selectionFiltered.length === 0 && !selectionLoading ? (
+              {selectionRowsFiltered.length === 0 && !selectionLoading ? (
                 <s-table-row>
                   <s-table-cell>
                     <s-text color="subdued">
-                      {selectionDraft.length === 0
-                        ? 'No products in this selection.'
-                        : 'No products found.'}
+                      {selectionDraft.length === 0 && selectionNoteDraft.length === 0
+                        ? 'No products or notes in this selection.'
+                        : 'No items found.'}
                     </s-text>
                   </s-table-cell>
                   <s-table-cell />
@@ -6146,137 +6322,102 @@ function Extension() {
                   {isPublicSelection ? <s-table-cell /> : null}
                 </s-table-row>
               ) : (
-                selectionFiltered.map((p) => (
-                  <s-table-row key={p.id}>
-                    {isPublicSelection ? (
+                selectionRowsFiltered.map((row: SelectionRow) => {
+                  const isFirst = selectionCombinedAll[0]?.id === row.id;
+                  const isLast =
+                    selectionCombinedAll[selectionCombinedAll.length - 1]?.id === row.id;
+                  const label = row.kind === 'product' ? row.product.title : 'Note';
+                  return (
+                    <s-table-row key={row.id}>
+                      {isPublicSelection ? (
+                        <s-table-cell>
+                          <s-checkbox
+                            accessibilityLabel={`Include ${label} when loading`}
+                            checked={Boolean(
+                              row.kind === 'product'
+                                ? checkedSelectionProducts[row.id]
+                                : checkedSelectionNotes[row.id],
+                            )}
+                            onChange={(e: any) =>
+                              row.kind === 'product'
+                                ? setSelectionProductChecked(row.id, e.currentTarget.checked)
+                                : setSelectionNoteChecked(row.id, e.currentTarget.checked)
+                            }
+                          />
+                        </s-table-cell>
+                      ) : null}
                       <s-table-cell>
-                        <s-checkbox
-                          accessibilityLabel={`Include ${p.title} when loading`}
-                          checked={Boolean(checkedSelectionProducts[p.id])}
-                          onChange={(e: any) =>
-                            setSelectionProductChecked(p.id, e.currentTarget.checked)
+                        {row.kind === 'product' ? (
+                          <s-stack direction="inline" gap="small" alignItems="center">
+                            {row.product.imageUrl ? (
+                              <s-thumbnail size="small" src={row.product.imageUrl} alt={row.product.title} />
+                            ) : null}
+                            <s-text type="strong">{row.product.title}</s-text>
+                          </s-stack>
+                        ) : (
+                          <s-text type="strong">📝 Note</s-text>
+                        )}
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-text color="subdued">
+                          {row.kind === 'product' ? row.product.handle : '—'}
+                        </s-text>
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-text color="subdued">
+                          {row.kind === 'product' ? formatQty(row.product.totalInventory) : '—'}
+                        </s-text>
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-text-field
+                          label={row.kind === 'product' ? `Note for ${row.product.title}` : 'Note text'}
+                          labelAccessibilityVisibility="exclusive"
+                          placeholder={row.kind === 'product' ? 'Add a note…' : undefined}
+                          value={row.kind === 'product' ? row.product.note || '' : row.note.note}
+                          onInput={(e: any) =>
+                            row.kind === 'product'
+                              ? setSelectionDraftNote(row.id, e.currentTarget.value)
+                              : setSelectionDraftNoteContent(row.id, e.currentTarget.value)
                           }
                         />
                       </s-table-cell>
-                    ) : null}
-                    <s-table-cell>
-                      <s-stack direction="inline" gap="small" alignItems="center">
-                        {p.imageUrl ? (
-                          <s-thumbnail size="small" src={p.imageUrl} alt={p.title} />
-                        ) : null}
-                        <s-text type="strong">{p.title}</s-text>
-                      </s-stack>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-text color="subdued">{p.handle}</s-text>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-text color="subdued">{formatQty(p.totalInventory)}</s-text>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-text-field
-                        label={`Note for ${p.title}`}
-                        labelAccessibilityVisibility="exclusive"
-                        placeholder="Add a note…"
-                        value={p.note || ''}
-                        onInput={(e: any) => setSelectionDraftNote(p.id, e.currentTarget.value)}
-                      />
-                    </s-table-cell>
-                    <s-table-cell>
-                      {/* Reordering uses move controls because Polaris has no drag-and-drop
-                          component and the sandbox exposes no HTML5 drag events. Moves are disabled
-                          while a search filters the list, so positions always reflect true order. */}
-                      <s-stack direction="inline" gap="small-400" alignItems="center">
-                        <s-button
-                          icon="chevron-up"
-                          variant="tertiary"
-                          accessibilityLabel={`Move ${p.title} up`}
-                          disabled={selectionSearch.trim() !== '' || selectionDraft[0]?.id === p.id}
-                          onClick={() => moveInSelectionDraft(p.id, -1)}
-                        />
-                        <s-button
-                          icon="chevron-down"
-                          variant="tertiary"
-                          accessibilityLabel={`Move ${p.title} down`}
-                          disabled={
-                            selectionSearch.trim() !== '' ||
-                            selectionDraft[selectionDraft.length - 1]?.id === p.id
-                          }
-                          onClick={() => moveInSelectionDraft(p.id, 1)}
-                        />
-                      </s-stack>
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-button
-                        icon="x"
-                        variant="tertiary"
-                        accessibilityLabel={`Remove ${p.title}`}
-                        onClick={() => removeFromSelectionDraft(p.id)}
-                      />
-                    </s-table-cell>
-                  </s-table-row>
-                ))
-              )}
-            </s-table-body>
-          </s-table>
-
-          <s-box padding="base">
-            <s-heading>Notes in this selection</s-heading>
-          </s-box>
-
-          <s-table>
-            <s-table-header-row>
-              {isPublicSelection ? <s-table-header>Use</s-table-header> : null}
-              <s-table-header listSlot="primary">Note</s-table-header>
-              <s-table-header>Remove</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {selectionNotesFiltered.length === 0 ? (
-                <s-table-row>
-                  <s-table-cell>
-                    <s-text color="subdued">
-                      {selectionNoteDraft.length === 0
-                        ? 'No notes in this selection.'
-                        : 'No notes found.'}
-                    </s-text>
-                  </s-table-cell>
-                  <s-table-cell />
-                  {isPublicSelection ? <s-table-cell /> : null}
-                </s-table-row>
-              ) : (
-                selectionNotesFiltered.map((n) => (
-                  <s-table-row key={n.id}>
-                    {isPublicSelection ? (
                       <s-table-cell>
-                        <s-checkbox
-                          accessibilityLabel="Include this note when loading"
-                          checked={Boolean(checkedSelectionNotes[n.id])}
-                          onChange={(e: any) =>
-                            setSelectionNoteChecked(n.id, e.currentTarget.checked)
+                        {/* Reordering uses move controls because Polaris has no drag-and-drop
+                            component and the sandbox exposes no HTML5 drag events. Moves are
+                            disabled while a search filters the list, so positions always reflect
+                            true combined order. */}
+                        <s-stack direction="inline" gap="small-400" alignItems="center">
+                          <s-button
+                            icon="chevron-up"
+                            variant="tertiary"
+                            accessibilityLabel={`Move ${label} up`}
+                            disabled={selectionSearch.trim() !== '' || isFirst}
+                            onClick={() => moveSelectionRow(row.id, -1)}
+                          />
+                          <s-button
+                            icon="chevron-down"
+                            variant="tertiary"
+                            accessibilityLabel={`Move ${label} down`}
+                            disabled={selectionSearch.trim() !== '' || isLast}
+                            onClick={() => moveSelectionRow(row.id, 1)}
+                          />
+                        </s-stack>
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-button
+                          icon="x"
+                          variant="tertiary"
+                          accessibilityLabel={`Remove ${label}`}
+                          onClick={() =>
+                            row.kind === 'product'
+                              ? removeFromSelectionDraft(row.id)
+                              : removeNoteFromDraft(row.id)
                           }
                         />
                       </s-table-cell>
-                    ) : null}
-                    <s-table-cell>
-                      <s-text-field
-                        label="Note text"
-                        labelAccessibilityVisibility="exclusive"
-                        value={n.note}
-                        onInput={(e: any) =>
-                          setSelectionDraftNoteContent(n.id, e.currentTarget.value)
-                        }
-                      />
-                    </s-table-cell>
-                    <s-table-cell>
-                      <s-button
-                        icon="x"
-                        variant="tertiary"
-                        accessibilityLabel="Remove note"
-                        onClick={() => removeNoteFromDraft(n.id)}
-                      />
-                    </s-table-cell>
-                  </s-table-row>
-                ))
+                    </s-table-row>
+                  );
+                })
               )}
             </s-table-body>
           </s-table>
@@ -6748,11 +6889,14 @@ function Extension() {
         </s-button>
         <s-button
           slot="secondary-actions"
-          variant="tertiary"
+          variant="secondary"
           disabled={productSearch.trim() === ''}
           onClick={appendSearchToNote}
         >
-          Add search to note
+          Add search query
+        </s-button>
+        <s-button slot="secondary-actions" variant="tertiary" onClick={discardNoteDraft}>
+          Clear note
         </s-button>
         <s-button
           slot="secondary-actions"
