@@ -1,0 +1,301 @@
+TEMPLATE TO TEXT -- SYNTAX GUIDE
+=================================
+
+This is a reference for the {{ }} template language used to turn your selected products
+and notes into text files. Write your template body once, and it runs once per output
+file -- how many files that is depends on the File Break setting (see section 12).
+
+Every token is written inside double curly braces: {{ product.title }}
+Spacing inside the braces doesn't matter: {{product.title}} works the same way.
+
+
+1. PRODUCT AND VARIANT FIELDS
+------------------------------
+{{ product.title }}            Product title
+{{ product.handle }}           Product handle (URL slug)
+{{ product.vendor }}           Vendor
+{{ product.productType }}      Product type
+{{ product.status }}           Status (active, draft, archived)
+{{ product.description }}      Description
+{{ product.tags }}             Tags, comma-separated
+{{ product.totalInventory }}   Total inventory across all variants
+{{ product.priceMin }}         Lowest variant price
+{{ product.priceMax }}         Highest variant price
+{{ product.currencyCode }}     Currency code (e.g. USD)
+{{ product.createdAt }}        Created date/time
+{{ product.updatedAt }}        Last updated date/time
+{{ product.note }}             The note you typed for this product (blank if none)
+{{ product.length }}           How many variants this product has
+
+{{ variant.title }}            Variant title
+{{ variant.sku }}              SKU
+{{ variant.price }}            Price
+{{ variant.compareAtPrice }}   Compare-at price
+{{ variant.costPerItem }}      Cost per item
+{{ variant.barcode }}          Barcode
+{{ variant.inventoryQuantity }} Inventory for this specific variant
+
+{{ product.compareAtPrice }} and {{ product.costPerItem }} also work -- outside a
+variant loop they report the first variant's values.
+
+Example:
+  {{ product.title }} ({{ product.vendor }}) -- {{ variant.sku }}, ${{ variant.price }}
+  -->  Blue Mug (Acme Co) -- MUG-BLU-01, $12.00
+
+
+2. METAFIELDS
+-------------
+{{ product.metafield.NAMESPACE.KEY }}
+
+Example:
+  {{ product.metafield.custom.material }}
+  -->  Ceramic
+
+Use "Insert variable" in the editor to pick from every metafield your loaded products
+actually have -- it fills in the namespace and key for you.
+
+Don't know which metafields a product has, or want every one of them? Loop over them
+instead -- see the metafields loop in section 8.
+
+
+3. DATE, TIME, AND SHOP TOKENS
+--------------------------------
+{{ time=FORMAT }}     Formats the date/time this download was made, however you like.
+{{ primaryDomain }}   Your shop's domain -> myshop.myshopify.com
+
+Build FORMAT out of these letters (repeat a letter to change how it's shown):
+  d / dd            day of month              -> 3 / 03
+  ddd / dddd        weekday name              -> Tues / Tuesday
+  M / MM            month number              -> 3 / 03
+  MMM / MMMM        month name                -> Mar / March
+  y / yy / yyyy     year                      -> 26 / 26 / 2026
+  h / hh            hour, 12-hour clock       -> 6 / 06
+  H / HH            hour, 24-hour clock       -> 6 / 06
+  m / mm            minutes                   -> 5 / 05
+  s / ss            seconds                   -> 7 / 07
+  t / tt            AM or PM                  -> A / AM
+
+Anything else in FORMAT (spaces, commas, dashes, slashes, colons) is printed as-is. Put text
+in quotes if it happens to clash with one of the letters above, e.g. {{ time='at' h:mm tt }}.
+
+Examples:
+  {{ time=MM/dd/yyyy }}                    -->  03/03/2026
+  {{ time=h:mm tt }}                       -->  6:30 AM
+  {{ time=dddd, MMMM d, yyyy }}            -->  Tuesday, March 3, 2026
+
+All files generated in one download share the same date/time.
+
+The older {{ day }} / {{ month }} / {{ year }} / {{ day.week }} / {{ month.name }} /
+{{ year.short }} tokens are retired -- use {{ time=FORMAT }} instead (see the table above for
+the equivalent letters: dd, MM, yyyy, ddd, MMM, yy).
+
+
+4. WHITESPACE TOKENS
+---------------------
+{{ /return }}   A real line break
+{{ /space }}    A single space
+
+Use these when you need whitespace somewhere that would otherwise get trimmed, such as
+inside a wrap block's delineator (see section 12).
+
+
+5. VARIABLES AND MATH
+----------------------
+Any word can be a variable. Seven short names (i, j, k, l, x, y, z) are offered as
+shortcuts, but any name works as long as it isn't one of the reserved words used by
+the tags below (if, while, wrap, repeat, chop, index, insert, comment, length, time,
+tag, break, skip, and a few tag-parameter names like direction/delineator/drop).
+
+Assign:      {{ x = 5 }}          (writes nothing to the output)
+Read:        {{ x }}              (outputs the current value)
+Equation:    {{ = {{x}} + 1 }}    Always start an equation with =, and always wrap a
+                                   variable being used in an equation in its own {{ }}.
+
+Supported operators: + - * / % ^ (and parentheses).
+
+Example:
+  {{ x = 3 }}
+  {{ x = {{ ={{x}}*2 }} }}
+  Total: {{ x }}
+  -->  Total: 6
+
+
+6. BOOLEAN CONDITIONS
+-----------------------
+{{ TRUE != FALSE }}   ->  TRUE
+{{ 3 > 2 }}            ->  TRUE
+{{ product.vendor == Acme Co }}
+{{ {{x}} >= 10 && {{y}} < 5 }}
+
+Operators: == != < > <= >= && || !   Group with parentheses: {{ (A || B) && C }}
+A condition with no comparison at all is just checked for "truthy" (non-empty,
+non-zero, and not literally FALSE or 0).
+
+
+7. IF / ELSE
+-------------
+{{ #if=CONDITION }}
+  ...shown when TRUE...
+{{ #else }}
+  ...shown when FALSE...
+{{ /if }}
+
+Example:
+  {{ #if={{ product.totalInventory }} > 0 }}
+  In stock
+  {{ #else }}
+  Out of stock
+  {{ /if }}
+
+{{ #else }} is optional. If blocks can be nested inside each other and inside loops.
+
+
+8. LOOPS
+---------
+
+8a. Variant loop -- steps through one product's variants
+  {{ #variants.foreach v, l=0 }}
+  {{ variant.title }}: {{ variant.price }}
+  {{/variants.foreach}}
+
+8b. Tags loop -- steps through one product's tags
+  {{ #tags.foreach tag, i=0 }}
+  #{{ tag }}
+  {{/tags.foreach}}
+
+8c. Selection loops -- step through your whole selection (used with File Break set to
+    "Selection", see section 12). One tag, with an optional word after it choosing what
+    to iterate:
+  {{ #selection.foreach product, i=0 }}   products only (the default)
+  {{ #selection.foreach note, i=0 }}      notes only
+  {{ #selection.foreach object, i=0 }}    products, then notes
+
+  Example:
+    {{ #selection.foreach product, i=0 }}
+    {{ i }}. {{ product.title }} -- {{ product.handle }}
+    {{/selection.foreach}}
+    -->  0. Blue Mug -- blue-mug
+         1. Red Mug -- red-mug
+
+  Options (added after the counter, comma-separated): skip_first=TRUE, skip_last=TRUE
+
+8d. Metafields loop -- steps through one product's metafields
+  {{ #metafields.foreach mf, i=0 }}
+  {{ mf.namespace }}.{{ mf.key }}: {{ mf.value }}
+  {{/metafields.foreach}}
+  -->  custom.material: Ceramic
+       custom.color: Blue
+
+8e. While loop -- repeats while a condition is true; you control your own counter
+  {{ x = 1 }}
+  {{ #while={{x}}<5 }}
+  {{ x }},
+  {{ x = {{ ={{x}}+1 }} }}
+  {{/while}}
+  -->  1,2,3,4,
+
+Every loop supports {{ break }} (stop the loop now) and {{ skip }} (skip just this
+one iteration) -- almost always used inside an {{ #if=... }} check.
+
+
+9. TEXT TOOLS
+--------------
+Length -- character count of the inner content:
+  {{ #length }}{{ product.title }}{{/length}}   -->  8   (for "Blue Mug")
+
+Chop -- keep everything up to where a condition first becomes true:
+  {{ #chop={{ {{j}}==3 }}, direction=L, j=0 }}{{ product.title }}{{/chop}}
+  -->  "Blu"  (first 3 characters; direction=R walks from the right instead)
+
+Repeat -- output the inner content N times:
+  {{ #repeat=3, delineator=; }}{{ product.sku }}{{/repeat}}
+  -->  SKU1;SKU1;SKU1
+
+Index -- one character of the inner content, by position (0-based, negative counts
+from the end):
+  {{ #index=-1 }}{{ product.title }}{{/index}}   -->  "g"  (last letter of "Blue Mug")
+
+Insert -- splice text into the surrounding output at a character position:
+  {{ #insert=0, drop=FALSE }}>> {{/insert}}Blue Mug
+  -->  >> Blue Mug
+
+Wrap -- break long text into fixed-width lines:
+  {{#wrap=20, min_wraps=0, max_wraps=0, hard=FALSE, delineator={{ /return }}}}
+  {{ product.description }}
+  {{/wrap}}
+
+
+10. COMMENTS
+-------------
+{{ #comment }}
+This text is stripped out before the template runs. Use it for notes to yourself.
+{{ /comment }}
+
+
+11. SELECTION-WIDE TOKENS
+---------------------------
+{{ selection.length }}                     Number of products selected
+{{ selection.first.product.handle }}       A field from the FIRST product/variant
+{{ selection.last.product.handle }}        A field from the LAST product/variant
+
+{{ selection.curr.type }}                  What the object currently rendering is:
+{{ selection.next.type }}                  "product", "variant", or "note"
+{{ selection.prev.type }}
+{{ selection.next.product.title }}         A field from the NEXT object in sequence
+{{ selection.prev.product.title }}         A field from the PREVIOUS object
+
+selection.next / selection.prev resolve to nothing when there is no next/previous
+object (the first or last item). These are especially useful with Merge IF (section
+13) to decide whether the next object belongs in this file or a new one.
+
+
+12. FILE BREAK -- HOW MANY FILES YOU GET
+-------------------------------------------
+Every template has a File Break setting, chosen in the editor:
+
+  Variant     One file per variant (the default)
+  Product     One file per product, regardless of variant count
+  Note        One file per note
+  Object      One file per product AND per note, in the order you added them
+  Selection   One file total, with a {{ #selection.foreach }} looping over everyone
+              inside it
+
+Pick the mode that matches what you're building: a packing slip per variant, a
+product sheet per product, a single combined order sheet, etc.
+
+
+13. MERGE IF -- COMBINING FILES CONDITIONALLY
+------------------------------------------------
+Below the File Break setting is a "Merge IF:" condition. It runs between every pair
+of neighboring objects and decides whether to APPEND the next object's output onto
+the current file (TRUE) or start a new file as usual (FALSE, or left blank).
+
+Example -- keep appending products to the same file as long as the next one has the
+same vendor, only starting a new file when the vendor changes:
+  {{ selection.next.product.vendor }} == {{ selection.curr.product.vendor }}
+
+Leave this blank for the ordinary one-file-per-object behavior described above.
+
+
+QUICK REFERENCE
+-----------------
+{{ product.FIELD }}                     {{ variant.FIELD }}
+{{ product.metafield.NS.KEY }}          {{ product.note }}
+{{ time=MM/dd/yyyy }}  {{ time=h:mm tt }}  {{ time=dddd, MMMM d, yyyy }}
+{{ primaryDomain }}                     {{ /return }} {{ /space }}
+{{ x = VALUE }}  {{ x }}                {{ = EXPR }}
+{{ #if=COND }} ... {{ #else }} ... {{ /if }}
+{{ #variants.foreach v, l=0 }} ... {{/variants.foreach}}
+{{ #tags.foreach tag, i=0 }} ... {{/tags.foreach}}
+{{ #metafields.foreach mf, i=0 }} ... {{/metafields.foreach}}
+{{ #selection.foreach product/object/note, i=0 }} ... {{/selection.foreach}}
+{{ #while=COND }} ... {{/while}}          {{ break }}  {{ skip }}
+{{ #length }}TEXT{{/length}}
+{{ #chop=COND, direction=L, j=0 }} ... {{/chop}}
+{{ #repeat=N, delineator=X }} ... {{/repeat}}
+{{ #index=N }} ... {{/index}}
+{{ #insert=N, drop=FALSE }} ... {{/insert}}
+{{ #wrap=N, min_wraps=0, max_wraps=0, hard=FALSE, delineator=X}} ... {{/wrap}}
+{{ #comment }} ... {{ /comment }}
+{{ selection.length }}  {{ selection.first.* }}  {{ selection.last.* }}
+{{ selection.curr/next/prev.type }}  {{ selection.curr/next/prev.product/variant.FIELD }}
