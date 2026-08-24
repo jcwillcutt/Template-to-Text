@@ -120,6 +120,19 @@ interface TemplateData {
   // planOutputFiles, which returns a zero-file plan with a clear, actionable error for a null
   // fileBreak rather than guessing one).
   fileBreak: FileBreak | null;
+  // Session 9. A boolean condition (same grammar as an `{{ #if=... }}` condition) evaluated between
+  // each pair of ADJACENT output units -- variant/product/note/object rows for the four per-unit
+  // fileBreak modes, or the first selection-scope foreach block's iterated items for 'selection'
+  // mode -- to decide whether to MERGE the next unit's rendered output into the current file instead
+  // of starting a new one. TRUE means merge/append; an empty string (the default for every new and
+  // every pre-session-9 template) means "never merge," reproducing today's exact per-unit-mode/
+  // single-or-uncounted-'selection'-mode behavior with zero required action. See
+  // `partitionByMergeCondition` and the `selection.next`/`selection.prev`/`selection.curr` tokens it
+  // makes meaningful. This REPLACES the old `i=0<N` chunk-size sub-syntax on
+  // `selection.foreach`/`products.foreach` (deprecated, see `expandForeachBlocks`) -- a template that
+  // relied on that syntax needs an explicit Merge IF condition to keep producing multiple files; see
+  // the session 9 migration notes in roadmap.md.
+  mergeCondition: string;
 }
 
 // Which bulk-select button is active: every product shown, or only those with inventory above 0.
@@ -579,6 +592,7 @@ function mapStoredTemplate(entry: any): TemplateData {
         ? entry.pinnedAt
         : null,
     fileBreak,
+    mergeCondition: typeof entry?.mergeCondition === 'string' ? entry.mergeCondition : '',
   };
 }
 
@@ -596,6 +610,7 @@ function serializeTemplateEntry(t: TemplateData): string {
     // An unpinned template never carries a stale timestamp.
     pinnedAt: t.pinned === true ? (t.pinnedAt ?? null) : null,
     fileBreak: t.fileBreak,
+    mergeCondition: t.mergeCondition,
   });
 }
 
@@ -1088,6 +1103,24 @@ function metafieldValue(product: ProductData, namespace: string, key: string): s
   return mf ? mf.value || '' : '';
 }
 
+// What kind of thing a rendered row/unit actually is -- exposed via `{{ selection.curr.type }}` /
+// `{{ selection.next.type }}` / `{{ selection.prev.type }}` (session 9). 'variant' is a single
+// variant-row (one product, one variant -- what `expandSelectionToRows`/'variant' fileBreak mode
+// produce); 'product' is a whole product, all/narrowed variants intact (what 'product'/'object'
+// fileBreak mode's per-product units are, and NOT what a `selection.foreach` loop ever iterates,
+// since that always variant-expands first); 'note' is a free-standing note, always represented via
+// `noteToPseudoProduct`. Not derivable from a `ProductData`'s own shape (a genuinely single-variant
+// product looks identical to a variant-expanded row), so it's threaded alongside the row rather than
+// inferred from it.
+type RowKind = 'product' | 'variant' | 'note';
+
+// A row/unit paired with its own kind -- what `selection.next`/`selection.prev` (session 9) resolve
+// against. See RowKind's comment and `partitionByMergeCondition` below.
+interface KindedRow {
+  row: ProductData;
+  kind: RowKind;
+}
+
 // Per-render evaluation context: the current loop counter value (`i`), the total number of products
 // the merchant selected (`selectionLength`), the shop's primary domain host (`primaryDomain`), and
 // the precomputed date-token values (`date`). Threaded through token substitution and math evaluation
@@ -1102,6 +1135,16 @@ interface EvalContext {
   // `{{ x = ... }}` assignments write to this same object, so a value written inside a nested loop
   // stays visible to the enclosing loop's next iteration.
   vars: Record<string, string>;
+  // Session 9: what `{{ selection.curr.type }}`/`{{ selection.next.* }}`/`{{ selection.prev.* }}`
+  // resolve against. Set ONCE per top-level render unit (a 'selection'-mode foreach iteration, or a
+  // per-unit fileBreak mode's one unit) and left UNCHANGED for the rest of that render, including
+  // inside any nested variant/tag/while loop within it -- these describe the current render's
+  // position in the overall output sequence, not "whatever the innermost loop happens to be
+  // iterating right now." `next`/`prev` are null when there is no neighboring unit (first/last
+  // position), which is what makes the tokens resolve to '' rather than erroring.
+  currKind: RowKind;
+  prev: KindedRow | null;
+  next: KindedRow | null;
 }
 
 // The variable names offered in the Variables menu, as convenient shortcuts -- variables are NOT
@@ -1233,6 +1276,20 @@ function resolveTokenExpr(
   }
   if (parts[0] === 'selection' && parts[1] === 'last') {
     return resolveOnProduct(list[list.length - 1], parts.slice(2), ctx);
+  }
+  // Session 9: `{{ selection.curr/next/prev.type }}` and `{{ selection.curr/next/prev.product/
+  // variant.FIELD }}` -- the current render's position in the overall output sequence (see
+  // EvalContext.currKind/prev/next's comment). `curr` is always defined (it's just `product`/
+  // `ctx.currKind`, the row already being rendered); `next`/`prev` are null at the last/first
+  // position, which is exactly when these resolve to '' -- no neighbor to describe.
+  if (parts[0] === 'selection' && (parts[1] === 'curr' || parts[1] === 'next' || parts[1] === 'prev')) {
+    const slot = parts[1];
+    const neighbor = slot === 'curr' ? { row: product, kind: ctx.currKind } : slot === 'next' ? ctx.next : ctx.prev;
+    if (!neighbor) return '';
+    if (parts[2] === 'type' && parts.length === 3) {
+      return neighbor.kind;
+    }
+    return resolveOnProduct(neighbor.row, parts.slice(2), ctx);
   }
   return resolveOnProduct(product, parts, ctx);
 }
@@ -3001,9 +3058,9 @@ function applyWrapBlocks(text: string): string {
 }
 
 // ----------------------------------------------------------------------------------------------
-// TEMPLATE ENGINE -- selection.foreach blocks & chunk planning
-// Includes the chunk-size helpers (firstForeachChunkSize/firstForeachIteratedCount) used by
-// planCombined below to decide whether one template body must become multiple output files.
+// TEMPLATE ENGINE -- selection.foreach blocks & Merge IF file-grouping
+// Includes firstForeachIteratedItems/partitionByMergeCondition (session 9), used by planCombined
+// below to decide whether one template body must become multiple output files.
 // ----------------------------------------------------------------------------------------------
 // Remove every complete foreach block's TAGS from `text`, keeping the inner content (recursively).
 function unwrapForeachBlocks(text: string): string {
@@ -3196,11 +3253,8 @@ function findSelectionScopeForeachBlock(
 
 // Determine which rows a foreach block should iterate over given skip options. Operates on the
 // variant-expanded row list (one entry per variant), so skip_first/skip_last drop the first/last ROW.
-function foreachSelection(
-  rows: ProductData[],
-  skipFirst: boolean,
-  skipLast: boolean,
-): ProductData[] {
+// Generic (T, not hardcoded ProductData) since session 9 calls this with KindedRow[] as well.
+function foreachSelection<T>(rows: T[], skipFirst: boolean, skipLast: boolean): T[] {
   if (rows.length === 1) {
     return skipFirst || skipLast ? [] : rows;
   }
@@ -3226,27 +3280,39 @@ function foreachSelection(
 // discards just the current iteration and continues.
 // The item list a selection-scope foreach match actually iterates, per its dispatched kind (see
 // SelectionScopeForeachKind's comment): 'rows' -- the selection's products (variant-expanded,
-// unchanged from always-existing behavior); 'notes' -- the selection's free-standing notes, each
-// wrapped via noteToPseudoProduct; 'object' (new, session 7) -- products THEN notes, combined, in
-// that order (mirroring the 'object' fileBreak mode's own ordering). Shared by expandForeachBlocks,
-// firstForeachChunkSize, and firstForeachIteratedCount so the three stay in agreement.
+// unchanged from always-existing behavior), tagged `kind: contextRowKind` (always 'variant' for
+// every real call site -- `contextRows` here is only ever `planCombined`'s already-variant-expanded
+// list); 'notes' -- the selection's free-standing notes, each wrapped via noteToPseudoProduct, tagged
+// 'note'; 'object' (session 7) -- products THEN notes, combined, in that order (mirroring the
+// 'object' fileBreak mode's own ordering). Shared by expandForeachBlocks and
+// firstForeachIteratedItems so the two stay in agreement. `contextRowKind` exists as its own
+// parameter, rather than being hardcoded, purely so this signature stays honest about not assuming
+// what `contextRows` contains -- session 9's `selection.curr/next/prev.type` tokens are the reason
+// a row's kind needs to be tracked at all now.
 function itemListForForeachKind(
   kind: SelectionScopeForeachKind,
   contextRows: ProductData[],
+  contextRowKind: RowKind,
   notes: SelectionEntry[],
-): ProductData[] {
-  const notesAsRows = () => notes.map((n) => noteToPseudoProduct(n));
+): KindedRow[] {
+  const notesAsRows = (): KindedRow[] => notes.map((n) => ({ row: noteToPseudoProduct(n), kind: 'note' }));
+  const rowsAsKinded = (): KindedRow[] => contextRows.map((row) => ({ row, kind: contextRowKind }));
   if (kind === 'notes') return notesAsRows();
-  if (kind === 'object') return [...contextRows, ...notesAsRows()];
-  return contextRows;
+  if (kind === 'object') return [...rowsAsKinded(), ...notesAsRows()];
+  return rowsAsKinded();
 }
 
 function expandForeachBlocks(
   body: string,
   contextRows: ProductData[],
+  contextRowKind: RowKind,
   notes: SelectionEntry[],
   baseCtx: EvalContext,
-  chunkFirstBlock: { size: number; fileIndex: number } | null,
+  // A CONTIGUOUS index range, into the (skip-filtered) iterated item list, to render for THIS file --
+  // used when the template's Merge IF condition (session 9) has split that list into more than one
+  // group; every group is contiguous by construction (partitionByMergeCondition only ever merges
+  // ADJACENT items), so a simple [from, to) range is always sufficient. `null` renders every item.
+  chunkFirstBlock: { from: number; to: number } | null,
 ): string {
   let result = '';
   let cursor = 0;
@@ -3259,32 +3325,57 @@ function expandForeachBlocks(
     }
     result += body.slice(cursor, match.blockStart);
     const opts = parseForeachOptions(match.params);
-    const itemList = itemListForForeachKind(match.kind, contextRows, notes);
-    const resolveContext = itemList[0] ?? contextRows[0];
+    const fullItemList = itemListForForeachKind(match.kind, contextRows, contextRowKind, notes);
+    const resolveContext = fullItemList[0]?.row ?? contextRows[0];
     const startBase = resolveExprToNumber(opts.startExpr, resolveContext, contextRows, baseCtx) ?? 0;
     const startIndex = Math.round(startBase);
-    let iterated = foreachSelection(itemList, opts.skipFirst, opts.skipLast);
-    let counterBase = startIndex;
+    const filteredFull = foreachSelection(fullItemList, opts.skipFirst, opts.skipLast);
+    // DEPRECATED (session 9): the old `i=START<MAX` chunk-size sub-syntax is retired -- the
+    // template's Merge IF setting now controls how this list is split into files (see
+    // partitionByMergeCondition / planCombined). Still DETECTED, so a template that used it renders a
+    // visible marker instead of silently losing its old chunking with no explanation, but the value
+    // itself is never read for anything -- the loop below always runs its full (skip-filtered) item
+    // list, or whatever window `chunkFirstBlock` (now driven by Merge IF grouping) supplies.
+    const deprecationPrefix =
+      opts.maxExpr.trim() !== ''
+        ? deprecatedSyntaxMarker(
+            'the i=START<MAX chunk-size syntax on a foreach tag is retired -- use this template’s ' +
+              'Merge IF setting instead to control how objects are grouped into files',
+          )
+        : '';
     const isFirstBlock = !seenFirstBlock;
     seenFirstBlock = true;
-    // Chunk only the first selection-scope block found, and only when chunking is active.
-    if (isFirstBlock && chunkFirstBlock) {
-      const from = chunkFirstBlock.fileIndex * chunkFirstBlock.size;
-      const to = from + chunkFirstBlock.size;
-      iterated = iterated.slice(from, to);
-      // The counter RESETS to the START value at the beginning of every chunk file (it does NOT
-      // continue globally across files). So within each file `{{ i }}` runs START, START+1, ...
-      // up to at most START + size - 1 -- effectively `i` mod the chunk size within each file.
-      counterBase = startIndex;
-    }
-    let rendered = '';
-    for (let iterationIndex = 0; iterationIndex < iterated.length; iterationIndex++) {
-      // First iteration takes the declared start value; every later iteration performs
-      // `name = name + 1` against the CURRENT stored value, so a nested loop that writes the same
-      // variable carries its count forward into this loop's next iteration.
+    // Window only the first selection-scope block found, and only when a window is active; every
+    // other block (or this one outside a window) renders its full filtered list. `prev`/`next` below
+    // always look up TRUE neighbors in `filteredFull` by absolute index, even inside a window -- a
+    // unit's neighbor may belong to a DIFFERENT output file when Merge IF split this list, and
+    // `selection.next`/`selection.prev` describe the overall selection, not "the rest of this file."
+    const windowFrom = isFirstBlock && chunkFirstBlock ? chunkFirstBlock.from : 0;
+    const windowTo = isFirstBlock && chunkFirstBlock ? chunkFirstBlock.to : filteredFull.length;
+    // Save/restore currKind/prev/next around this block's own iterations (the same save/restore
+    // shape a stack scope would use): each iteration below mutates these on the shared `baseCtx` --
+    // necessary so a NESTED selection-scope foreach's own position is what a token inside it sees --
+    // but unlike a loop counter (which deliberately carries forward after a loop ends, see the
+    // existing counterValue comment below), a foreach block's OWN position in a list must NOT leak
+    // into whatever text follows it in the body: a plain `{{ selection.next.* }}` token written AFTER
+    // this foreach block should still describe the ENCLOSING scope's neighbor (the top-level unit
+    // this whole render is for, or an outer foreach iteration), not this block's last iteration's.
+    const savedCurrKind = baseCtx.currKind;
+    const savedPrev = baseCtx.prev;
+    const savedNext = baseCtx.next;
+    let rendered = deprecationPrefix;
+    for (let idx = windowFrom, withinFileIndex = 0; idx < windowTo; idx++, withinFileIndex++) {
+      // First iteration WITHIN THIS FILE'S WINDOW takes the declared start value; every later
+      // iteration performs `name = name + 1` against the CURRENT stored value, so a nested loop that
+      // writes the same variable carries its count forward into this loop's next iteration. The
+      // counter RESETS to the START value at the start of every new window/file (unchanged from the
+      // old size-based chunking's own counter-reset behavior).
       const counterValue =
-        iterationIndex === 0 ? counterBase : readVarNumber(baseCtx.vars, opts.name) + 1;
+        withinFileIndex === 0 ? startIndex : readVarNumber(baseCtx.vars, opts.name) + 1;
       baseCtx.vars[opts.name] = String(counterValue);
+      baseCtx.currKind = filteredFull[idx].kind;
+      baseCtx.prev = idx > 0 ? filteredFull[idx - 1] : null;
+      baseCtx.next = idx < filteredFull.length - 1 ? filteredFull[idx + 1] : null;
       // Recursively expand any NESTED selection-scope foreach block within THIS block's own inner
       // text (against the same contextRows/notes -- a nested loop over "the selection" still means
       // the same top-level selection, not something row-scoped) before rendering it for this
@@ -3297,60 +3388,93 @@ function expandForeachBlocks(
       // (same symptom class as the session-6 regex bug) until this recursive expansion was added.
       // A no-op scan (cheap) for the overwhelmingly common non-nested case, since
       // findSelectionScopeForeachBlock finds nothing and returns match.inner unchanged.
-      const expandedInner = expandForeachBlocks(match.inner, contextRows, notes, baseCtx, null);
-      const iterationText = renderTokens(expandedInner, iterated[iterationIndex], contextRows, baseCtx);
+      const expandedInner = expandForeachBlocks(
+        match.inner,
+        contextRows,
+        contextRowKind,
+        notes,
+        baseCtx,
+        null,
+      );
+      const iterationText = renderTokens(expandedInner, filteredFull[idx].row, contextRows, baseCtx);
       const signal = loopControlSignal(iterationText);
       if (!signal.discard) rendered += iterationText;
       if (signal.stop) break;
     }
+    baseCtx.currKind = savedCurrKind;
+    baseCtx.prev = savedPrev;
+    baseCtx.next = savedNext;
     result += rendered;
     cursor = match.blockEnd;
   }
   return result;
 }
 
-// Read the chunk size (max) declared on the FIRST selection-scope foreach block that declares one,
-// resolving its maxExpr against the given rows/context. Returns a positive integer chunk size, or
-// null when no such block declares a valid (> 0) max.
-function firstForeachChunkSize(
+// Locate the FIRST selection-scope foreach block and return its (skip-filtered) iterated item list,
+// tagged by kind -- or null when there is no such block. This is what 'selection' fileBreak mode
+// partitions into files via the template's Merge IF condition (see planCombined/
+// partitionByMergeCondition). Reads only structured row/note data already in hand (never rendered
+// template output), which is what lets the file count still be known before any file is built --
+// the same property the old firstForeachChunkSize/firstForeachIteratedCount pair (retired, session 9)
+// relied on. `contextRows` here is always variant-expanded (this is only ever called from
+// planCombined, 'selection' mode's own planner), so 'variant' is hardcoded as its kind.
+function firstForeachIteratedItems(
   body: string,
   contextRows: ProductData[],
   notes: SelectionEntry[],
-  baseCtx: EvalContext,
-): number | null {
-  let cursor = 0;
-  while (cursor < body.length) {
-    const match = findSelectionScopeForeachBlock(body, cursor);
-    if (!match) return null;
-    const opts = parseForeachOptions(match.params);
-    if (opts.maxExpr.trim() !== '') {
-      const itemList = itemListForForeachKind(match.kind, contextRows, notes);
-      const resolveContext = itemList[0] ?? contextRows[0];
-      const maxVal = resolveExprToNumber(opts.maxExpr, resolveContext, contextRows, baseCtx);
-      if (maxVal != null) {
-        const size = Math.round(maxVal);
-        return size > 0 ? size : null;
-      }
-      return null;
-    }
-    cursor = match.blockEnd;
-  }
-  return null;
+): KindedRow[] | null {
+  const match = findSelectionScopeForeachBlock(body, 0);
+  if (!match) return null;
+  const opts = parseForeachOptions(match.params);
+  const itemList = itemListForForeachKind(match.kind, contextRows, 'variant', notes);
+  return foreachSelection(itemList, opts.skipFirst, opts.skipLast);
 }
 
-// Count how many items the FIRST selection-scope foreach block iterates over (after skip
-// filtering), used to decide whether the count exceeds the chunk size. Returns 0 when there is no
-// such block.
-function firstForeachIteratedCount(
-  body: string,
-  contextRows: ProductData[],
-  notes: SelectionEntry[],
-): number {
-  const match = findSelectionScopeForeachBlock(body, 0);
-  if (!match) return 0;
-  const opts = parseForeachOptions(match.params);
-  const itemList = itemListForForeachKind(match.kind, contextRows, notes);
-  return foreachSelection(itemList, opts.skipFirst, opts.skipLast).length;
+// Partition an ordered list of kinded rows into contiguous groups (session 9) by evaluating the
+// template's Merge IF condition between every adjacent pair: TRUE means "merge" (the next item joins
+// the current group and its rendered output is appended, no new file); FALSE, an unparseable
+// condition, or an empty condition string all mean "don't merge" (the next item starts a new group/
+// file). An empty condition therefore never merges -- every item is its own group, exactly
+// reproducing the pre-session-9 default for both callers: one file per unit in the four per-unit
+// fileBreak modes, and a single, ungrouped file in 'selection' mode (what the now-retired i=0<N
+// syntax used to optionally split). Each evaluation gets its own fresh, throwaway variable store --
+// this is a PLANNING-phase decision, entirely separate from any real render pass's own variable
+// store, and (like firstForeachIteratedItems above) reads only structured data, never rendered
+// output, so file counts stay knowable before any file is built.
+function partitionByMergeCondition(
+  items: KindedRow[],
+  mergeCondition: string,
+  selectionLength: number,
+  primaryDomain: string,
+  date: DateParts,
+): number[][] {
+  const groups: number[][] = [];
+  if (items.length === 0) return groups;
+  const condition = mergeCondition.trim();
+  let current: number[] = [0];
+  for (let i = 0; i < items.length - 1; i++) {
+    let merge = false;
+    if (condition !== '') {
+      const probeCtx: EvalContext = {
+        selectionLength,
+        primaryDomain,
+        date,
+        vars: createVarStore(),
+        currKind: items[i].kind,
+        prev: i > 0 ? items[i - 1] : null,
+        next: items[i + 1],
+      };
+      merge = conditionIsTrue(condition, items[i].row, items.map((it) => it.row), probeCtx);
+    }
+    if (merge) {
+      current.push(i + 1);
+    } else {
+      groups.push(current);
+      current = [i + 1];
+    }
+  }
+  groups.push(current);
+  return groups;
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -3365,6 +3489,7 @@ function planCombined(
   body: string,
   products: ProductData[],
   notes: SelectionEntry[],
+  mergeCondition: string,
   selectionLength: number,
   primaryDomain: string,
   date: DateParts,
@@ -3372,29 +3497,44 @@ function planCombined(
   const rows = expandSelectionToRows(products);
   const first = rows[0];
   const withoutComments = flattenForeachInsideWhile(stripComments(applyWhitespaceTokens(body)));
-  const probeCtx: EvalContext = {
-    selectionLength,
-    primaryDomain,
-    date,
-    vars: createVarStore(),
-  };
 
-  const chunkSize = firstForeachChunkSize(withoutComments, rows, notes, probeCtx);
-  const iteratedCount = firstForeachIteratedCount(withoutComments, rows, notes);
-  const chunked = chunkSize != null && iteratedCount > chunkSize;
-  const fileCount = chunked ? Math.ceil(iteratedCount / (chunkSize as number)) : 1;
+  // Session 9: the first selection-scope foreach's iterated item list, partitioned into groups by
+  // the template's Merge IF condition -- replaces the old size-based i=0<N chunking (see
+  // expandForeachBlocks' deprecation of that syntax). No foreach block at all -> always exactly 1
+  // file, same as before. An empty Merge IF -> every item is its own "group," but since there's only
+  // ever ONE partition run (not one per item), that still collapses to a single, ungrouped file here
+  // -- matching the pre-session-9 default of "chunking is off unless you opt in."
+  const iteratedItems = firstForeachIteratedItems(withoutComments, rows, notes);
+  const groups = iteratedItems
+    ? partitionByMergeCondition(iteratedItems, mergeCondition, selectionLength, primaryDomain, date)
+    : null;
+  const grouped = groups != null && groups.length > 1;
+  const fileCount = grouped ? (groups as number[][]).length : 1;
+
+  // No neighbor/position is defined OUTSIDE a selection-scope foreach loop at the top level of
+  // 'selection' mode -- only a plain body token (resolving against `first`, matching how
+  // `selection.first.*` already works with no loop present) could read `selection.curr/next/prev.*`
+  // there, and there's no natural "next selection object" to report for a bare top-level token.
+  // Inside a loop, expandForeachBlocks sets these correctly per iteration (and restores them after).
+  const topLevelCtx = (): Pick<EvalContext, 'currKind' | 'prev' | 'next'> => ({
+    currKind: 'variant',
+    prev: null,
+    next: null,
+  });
 
   const render = (fileIndex: number | null): string => {
-    // Every output file starts from a FRESH variable store, so one chunk never leaks values into
-    // the next.
+    // Every output file starts from a FRESH variable store, so one group/file never leaks values
+    // into the next.
     const baseCtx: EvalContext = {
       selectionLength,
       primaryDomain,
       date,
       vars: createVarStore(),
+      ...topLevelCtx(),
     };
-    const chunk = chunked && fileIndex != null ? { size: chunkSize as number, fileIndex } : null;
-    const expanded = expandForeachBlocks(withoutComments, rows, notes, baseCtx, chunk);
+    const group = grouped && fileIndex != null ? (groups as number[][])[fileIndex] : null;
+    const chunk = group ? { from: group[0], to: group[group.length - 1] + 1 } : null;
+    const expanded = expandForeachBlocks(withoutComments, rows, 'variant', notes, baseCtx, chunk);
     const substituted = renderTokens(expanded, first, rows, baseCtx);
     // restoreWhitespaceTokens is the LAST step: turn any remaining whitespace sentinels (outside wrap
     // blocks) into real newlines / spaces.
@@ -3404,9 +3544,15 @@ function planCombined(
   return { fileCount, render };
 }
 
-// PER-PRODUCT mode: evaluate the template against a single row (one product + one variant). Any
-// foreach block iterates just that single row. `selectionLength` is the true number of products the
-// merchant selected (not 1), exposed via {{ selection.length }}.
+// PER-PRODUCT mode: evaluate the template against a single row/unit (one product + one variant, a
+// whole product, or a note). Any selection-scope foreach block iterates just that single unit.
+// `selectionLength` is the true number of products the merchant selected (not 1), exposed via
+// {{ selection.length }}. `prev`/`next` (session 9) are this unit's TRUE neighbors in the overall
+// per-unit output sequence -- computed by the caller (planOutputFiles) from the full ordered units
+// list, null at the first/last position -- and are what `{{ selection.prev/next.* }}` resolve
+// against for the whole render, not re-scoped by anything inside the body (see expandForeachBlocks'
+// save/restore comment for why a NESTED selection-scope foreach inside this unit's body still
+// re-scopes correctly to ITS OWN items, without disturbing these).
 //
 // `preparedBody` must already have been through applyWhitespaceTokens -> stripComments ->
 // flattenForeachInsideWhile (see planOutputFiles' PER-PRODUCT branch, which does this ONCE and
@@ -3417,7 +3563,9 @@ function planCombined(
 // body from scratch for every row; see architecture-notes.md for why that part was left alone.
 function evaluateSingle(
   preparedBody: string,
-  row: ProductData,
+  current: KindedRow,
+  prev: KindedRow | null,
+  next: KindedRow | null,
   selectionLength: number,
   primaryDomain: string,
   date: DateParts,
@@ -3427,6 +3575,9 @@ function evaluateSingle(
     primaryDomain,
     date,
     vars: createVarStore(),
+    currKind: current.kind,
+    prev,
+    next,
   };
   // Selection-scope loops iterate the WHOLE selection, which a single-row per-unit render doesn't
   // have (see planOutputFiles' non-'selection' branches -- each output file here IS one row). A
@@ -3434,8 +3585,8 @@ function evaluateSingle(
   // unchanged from always-existing behavior; `notes.foreach` has nothing to iterate here (there is
   // no selection-wide notes list threaded into per-unit rendering) and simply renders zero times --
   // not a regression, since this combination was never possible before this session either.
-  const expanded = expandForeachBlocks(preparedBody, [row], [], baseCtx, null);
-  const substituted = renderTokens(expanded, row, [row], baseCtx);
+  const expanded = expandForeachBlocks(preparedBody, [current.row], current.kind, [], baseCtx, null);
+  const substituted = renderTokens(expanded, current.row, [current.row], baseCtx);
   // restoreWhitespaceTokens is the LAST step: turn any remaining whitespace sentinels (outside wrap
   // blocks) into real newlines / spaces.
   return restoreWhitespaceTokens(applyWrapBlocks(substituted));
@@ -3723,10 +3874,12 @@ function dedupeNames(baseNames: string[]): string[] {
 
 // One renderable unit for a per-unit fileBreak mode ('variant' / 'product' / 'note' / 'object'): the
 // ProductData to render against (a real row for 'variant'/'product', or a note wrapped via
-// noteToPseudoProduct for 'note'/'object'), and its extension-less base filename before
-// de-duplication.
+// noteToPseudoProduct for 'note'/'object'), its RowKind (session 9 -- see RowKind's comment; what
+// `{{ selection.curr/next/prev.type }}` reports for this unit), and its extension-less base filename
+// before de-duplication.
 interface RenderUnit {
   row: ProductData;
+  kind: RowKind;
   baseName: string;
 }
 
@@ -3741,6 +3894,7 @@ interface RenderUnit {
 function productUnits(products: ProductData[], titleSlug: string): RenderUnit[] {
   return products.map((p) => ({
     row: { ...p, variants: p.variants.length > 0 ? p.variants : p.allVariants },
+    kind: 'product',
     baseName: `${p.handle}_${titleSlug}`,
   }));
 }
@@ -3748,6 +3902,7 @@ function productUnits(products: ProductData[], titleSlug: string): RenderUnit[] 
 function noteUnits(notes: SelectionEntry[], titleSlug: string): RenderUnit[] {
   return notes.map((n) => ({
     row: noteToPseudoProduct(n),
+    kind: 'note',
     baseName: `${noteFileSlug(n)}_${titleSlug}`,
   }));
 }
@@ -3759,6 +3914,7 @@ function planOutputFiles(
   products: ProductData[],
   notes: SelectionEntry[],
   fileBreak: FileBreak | null,
+  mergeCondition: string,
   primaryDomain: string,
   now: Date,
 ): FilePlan {
@@ -3791,12 +3947,15 @@ function planOutputFiles(
   const selectionLength = products.length;
 
   if (fileBreak === 'selection') {
-    // One file normally, or one file per chunk when the body's selection.foreach declares a max
-    // size -- unchanged from the previous (inferred) COMBINED mode, now reached by explicit choice.
+    // One file normally, or one file per group when the template's Merge IF condition (session 9)
+    // splits the first selection-scope foreach's iterated list into more than one group -- see
+    // planCombined/partitionByMergeCondition. Replaces the old i=0<N chunk-size sub-syntax, now
+    // deprecated (see expandForeachBlocks).
     const combined = planCombined(
       templateBody,
       products,
       notes,
+      mergeCondition,
       selectionLength,
       primaryDomain,
       dateParts,
@@ -3834,7 +3993,7 @@ function planOutputFiles(
     units = expandSelectionToRows(products).map((row) => {
       const rowVariant = row.variants[0];
       const variantSuffix = rowVariant ? `_${slugify(rowVariant.title)}` : '';
-      return { row, baseName: `${row.handle}${variantSuffix}_${titleSlug}` };
+      return { row, kind: 'variant' as RowKind, baseName: `${row.handle}${variantSuffix}_${titleSlug}` };
     });
   } else if (fileBreak === 'product') {
     units = productUnits(products, titleSlug);
@@ -3857,30 +4016,68 @@ function planOutputFiles(
       },
     };
   }
-  if (units.length === 1) {
-    const { row, baseName } = units[0];
+
+  // Session 9: partition units into groups via the template's Merge IF condition. An empty condition
+  // (the default for every new and every pre-session-9 template) puts every unit in its own group,
+  // one-to-one -- the exact pre-session-9 behavior, using the pre-existing per-unit naming below. A
+  // non-empty condition switches ALL naming for this template to the chunked-file convention (even
+  // for a group that never actually merges with a neighbor), so a template's own naming scheme can't
+  // silently flip-flop between conventions depending on what a runtime merge decision happens to do
+  // -- see TemplateData.mergeCondition's comment.
+  const kindedUnits: KindedRow[] = units.map((u) => ({ row: u.row, kind: u.kind }));
+  const groups = partitionByMergeCondition(
+    kindedUnits,
+    mergeCondition,
+    selectionLength,
+    primaryDomain,
+    dateParts,
+  );
+  const merging = mergeCondition.trim() !== '';
+  const renderGroup = (group: number[]): string =>
+    group
+      .map((unitIndex) =>
+        evaluateSingle(
+          preparedBody,
+          kindedUnits[unitIndex],
+          unitIndex > 0 ? kindedUnits[unitIndex - 1] : null,
+          unitIndex < kindedUnits.length - 1 ? kindedUnits[unitIndex + 1] : null,
+          selectionLength,
+          primaryDomain,
+          dateParts,
+        ),
+      )
+      .join('');
+
+  if (!merging) {
+    if (units.length === 1) {
+      const { baseName } = units[0];
+      return {
+        count: 1,
+        zipName: null,
+        build: () => ({ name: `${baseName}.${ext}`, content: renderGroup([0]) }),
+      };
+    }
+    const names = dedupeNames(units.map((u) => u.baseName)).map((base) => `${base}.${ext}`);
+    return {
+      count: units.length,
+      zipName: `${titleSlug}_zipped_${timestamp}.zip`,
+      build: (index: number) => ({ name: names[index], content: renderGroup([index]) }),
+    };
+  }
+  if (groups.length === 1) {
+    const name = `${timestamp}_looped_${titleSlug}.${ext}`;
     return {
       count: 1,
       zipName: null,
-      build: () => ({
-        name: `${baseName}.${ext}`,
-        content: evaluateSingle(preparedBody, row, selectionLength, primaryDomain, dateParts),
-      }),
+      build: () => ({ name, content: renderGroup(groups[0]) }),
     };
   }
-  const names = dedupeNames(units.map((u) => u.baseName)).map((base) => `${base}.${ext}`);
   return {
-    count: units.length,
+    count: groups.length,
     zipName: `${titleSlug}_zipped_${timestamp}.zip`,
     build: (index: number) => ({
-      name: names[index],
-      content: evaluateSingle(
-        preparedBody,
-        units[index].row,
-        selectionLength,
-        primaryDomain,
-        dateParts,
-      ),
+      name: `${timestamp}_looped_${titleSlug}_${index}.${ext}`,
+      content: renderGroup(groups[index]),
     }),
   };
 }
@@ -3894,6 +4091,7 @@ function buildOutputFiles(
   products: ProductData[],
   notes: SelectionEntry[],
   fileBreak: FileBreak | null,
+  mergeCondition: string,
   primaryDomain: string,
   now: Date,
 ): OutputFiles {
@@ -3904,6 +4102,7 @@ function buildOutputFiles(
     products,
     notes,
     fileBreak,
+    mergeCondition,
     primaryDomain,
     now,
   );
@@ -3923,27 +4122,28 @@ function yieldToBrowser(): Promise<void> {
 }
 
 // ----------------------------------------------------------------------------------------------
-// CLIENT-SIDE PRODUCT SEARCH -- simple substring + advanced boolean query language
-// parseSearchExpression/evaluateSearchNode implement an OR/AND/NOT grammar over `{{ }}`-delimited
-// groups that is structurally the same shape as the template if/boolean grammar above (line 1915
-// in the original numbering) but is a separate implementation with different leaves (substring
-// match vs. numeric/string comparison) -- see architecture-notes.md.
+// CLIENT-SIDE PRODUCT SEARCH -- simple substring matching, including metafields
+// RETIRED (session 9), per explicit direction: this used to also offer an advanced boolean query
+// language (`{{ }}`, `&&`, `||`, `!` -- an OR/AND/NOT grammar over double-brace-delimited groups,
+// structurally the same shape as the template if/boolean grammar above but a separate
+// implementation with different leaves: substring match vs. numeric/string comparison). It's gone,
+// not just hidden: on top of adding real complexity to the search UI, it turned out not to deliver
+// what it was actually built for -- combined AND/OR/NOT queries across several metafields at once.
+// The reason is architectural, not a parser bug: this app has no server-side full-text index over
+// metafield values, so ANY client-side query (boolean or plain) can only match against
+// `allLoadedProducts` -- whatever has already been paged/searched into the session cache (see
+// LOADED_PRODUCTS_CACHE_LIMIT) -- never the shop's full catalog. A plain substring term still
+// degrades usefully in that situation, since the server's own indexed search (`serverQueryFor`,
+// also removed) handles the common case and the client-side union only supplements it. A boolean
+// expression has no such fallback: `isAdvancedSearch` detects it and sends `query: null` to the
+// server outright (there's no Shopify search syntax for arbitrary metafield AND/OR/NOT), so it
+// depended ENTIRELY on the product already being in the local cache -- which, for a rare
+// metafield combination on a product the merchant hadn't already scrolled past, it usually wasn't.
+// What remains (`productMatchesQuery` below) still does everything the plain/simple search path
+// always did, including checking every metafield value -- partial string matches on metafields are
+// unaffected by this removal; only the `&&`/`||`/`!` combinator syntax is gone.
 // ----------------------------------------------------------------------------------------------
-// --- Client-side product search (metafield filter + advanced boolean mode) -------------------
-// Detect whether a search string should use the advanced boolean parser. Triggered by any of the
-// operators/grouping tokens `{{`, `}}`, `&&`, `||`, or `!`. Otherwise the simple Shopify search (with
-// client-side metafield augmentation) is used.
-function isAdvancedSearch(term: string): boolean {
-  return (
-    term.includes('{{') ||
-    term.includes('}}') ||
-    term.includes('&&') ||
-    term.includes('||') ||
-    term.includes('!')
-  );
-}
-
-// Case-insensitive substring test of a single leaf query term against one product's searchable
+// Case-insensitive substring test of a single query term against one product's searchable
 // fields: title, handle, vendor, productType, every tag, every variant SKU, and EVERY metafield
 // value (which covers the custom location metafields regardless of their stored namespace/key).
 function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
@@ -3965,126 +4165,6 @@ function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
     if (mf.value) haystacks.push(mf.value);
   }
   return haystacks.some((h) => (h || '').toLowerCase().includes(query));
-}
-
-// --- Boolean search expression parser --------------------------------------------------------
-// Grammar (lowest to highest precedence): OR (`||`), AND (`&&`), NOT (`!` prefix), a double-brace
-// group `{{ ... }}` (nested sub-expression when its inner text contains an operator or nested `{{`,
-// otherwise a leaf query term), and a bare leaf term. The parser produces a node tree; leaves carry
-// the trimmed query string. On any parse failure the caller falls back to a single implicit leaf.
-type SearchNode =
-  | { type: 'leaf'; query: string }
-  | { type: 'not'; child: SearchNode }
-  | { type: 'and'; left: SearchNode; right: SearchNode }
-  | { type: 'or'; left: SearchNode; right: SearchNode };
-
-// (This used to be a second function here, matchBraceGroup, byte-for-byte identical to
-// findMatchingClose above -- its one call site below now uses findMatchingClose directly.)
-
-// Split an expression on a top-level (brace-depth 0) operator (`||` or `&&`), returning the list of
-// segment strings. Operators inside `{{ }}` groups are left intact.
-function splitSearchTopLevel(expr: string, op: string): string[] {
-  const segments: string[] = [];
-  let depth = 0;
-  let last = 0;
-  let i = 0;
-  while (i < expr.length) {
-    if (expr[i] === '{' && expr[i + 1] === '{') {
-      depth += 1;
-      i += 2;
-      continue;
-    }
-    if (expr[i] === '}' && expr[i + 1] === '}') {
-      if (depth > 0) depth -= 1;
-      i += 2;
-      continue;
-    }
-    if (depth === 0 && expr.slice(i, i + op.length) === op) {
-      segments.push(expr.slice(last, i));
-      i += op.length;
-      last = i;
-      continue;
-    }
-    i += 1;
-  }
-  segments.push(expr.slice(last));
-  return segments;
-}
-
-// Whether `expr` (trimmed) is exactly one double-brace group wrapping the entire string.
-function isSingleBraceGroup(expr: string): boolean {
-  const trimmed = expr.trim();
-  if (trimmed.slice(0, 2) !== '{{' || trimmed.slice(-2) !== '}}') return false;
-  const end = findMatchingClose(trimmed, 0);
-  return end === trimmed.length;
-}
-
-// Parse a boolean search expression into a SearchNode tree. Throws on malformed input so the caller
-// can fall back to a single implicit leaf.
-function parseSearchExpression(rawExpr: string): SearchNode {
-  const expr = rawExpr.trim();
-  if (expr === '') {
-    throw new Error('Empty search expression');
-  }
-
-  // OR (lowest precedence).
-  const orParts = splitSearchTopLevel(expr, '||');
-  if (orParts.length > 1) {
-    return orParts
-      .map((part) => parseSearchExpression(part))
-      .reduce((left, right) => ({ type: 'or', left, right }));
-  }
-
-  // AND.
-  const andParts = splitSearchTopLevel(expr, '&&');
-  if (andParts.length > 1) {
-    return andParts
-      .map((part) => parseSearchExpression(part))
-      .reduce((left, right) => ({ type: 'and', left, right }));
-  }
-
-  // NOT (unary prefix).
-  if (expr[0] === '!') {
-    return { type: 'not', child: parseSearchExpression(expr.slice(1)) };
-  }
-
-  // A single double-brace group wrapping the whole expression.
-  if (isSingleBraceGroup(expr)) {
-    const inner = expr.slice(2, -2).trim();
-    // If the inner text itself contains an operator or a nested group, recurse into it as a
-    // sub-expression; otherwise it is a leaf query term (a phrase that may contain spaces).
-    if (isAdvancedSearch(inner)) {
-      return parseSearchExpression(inner);
-    }
-    if (inner === '') {
-      throw new Error('Empty brace group');
-    }
-    return { type: 'leaf', query: inner };
-  }
-
-  // Any leftover brace characters at this point mean the expression is malformed.
-  if (expr.includes('{{') || expr.includes('}}')) {
-    throw new Error('Unbalanced braces in search expression');
-  }
-
-  // Bare leaf term.
-  return { type: 'leaf', query: expr };
-}
-
-// Evaluate a parsed search tree against one product.
-function evaluateSearchNode(node: SearchNode, product: ProductData): boolean {
-  switch (node.type) {
-    case 'leaf':
-      return productMatchesQuery(product, node.query);
-    case 'not':
-      return !evaluateSearchNode(node.child, product);
-    case 'and':
-      return evaluateSearchNode(node.left, product) && evaluateSearchNode(node.right, product);
-    case 'or':
-      return evaluateSearchNode(node.left, product) || evaluateSearchNode(node.right, product);
-    default:
-      return false;
-  }
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -4352,6 +4432,11 @@ function Extension() {
   // guess; saveTemplate refuses to save while this is null (see editorFileBreakError), same
   // enforcement as the Title field.
   const [editorFileBreak, setEditorFileBreak] = useState<FileBreak | null>('variant');
+  // Session 9: "Merge IF" -- a boolean condition (same grammar as an {{ #if=... }} condition, using
+  // `{{ selection.curr/next/prev.* }}` tokens) deciding whether to merge the next unit's rendered
+  // output into the current file instead of starting a new one. Empty string (the default for a new
+  // template) means "never merge" -- see TemplateData.mergeCondition's comment for the full design.
+  const [editorMergeCondition, setEditorMergeCondition] = useState('');
   const [editorTitleError, setEditorTitleError] = useState<string | null>(null);
   const [editorFileBreakError, setEditorFileBreakError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
@@ -4367,11 +4452,13 @@ function Extension() {
     body: string;
     extension: string;
     fileBreak: FileBreak | null;
+    mergeCondition: string;
   }>({
     title: '',
     body: '',
     extension: '',
     fileBreak: 'variant',
+    mergeCondition: '',
   });
 
   // Download: filename shown in the confirmation popup after the merchant clicks the download link.
@@ -4413,10 +4500,7 @@ function Extension() {
 
   // The products shown in the table. Combines the server-side page results with client-side matches:
   //  - No applied search term: just the server page results.
-  //  - Advanced boolean term (contains {{ }} && || !): parse the expression and evaluate it against
-  //    every loaded product; on a parse error, fall back to a single implicit leaf query. Server
-  //    results are not used for filtering in this mode.
-  //  - Simple non-empty term: UNION of the server page results and any loaded product whose metafield
+  //  - Non-empty term: UNION of the server page results and any loaded product whose metafield
   //    (or other searchable field) values contain the term (case-insensitive), de-duplicated by id
   //    with server results first.
   const displayedProducts = useMemo<ProductData[]>(() => {
@@ -4425,16 +4509,6 @@ function Extension() {
       return products;
     }
     const loadedList = Object.values(allLoadedProducts);
-    if (isAdvancedSearch(term)) {
-      let tree: SearchNode;
-      try {
-        tree = parseSearchExpression(term);
-      } catch {
-        tree = { type: 'leaf', query: term };
-      }
-      return loadedList.filter((p) => evaluateSearchNode(tree, p));
-    }
-    // Simple term: union of server results + client-side field/metafield matches from loaded set.
     const result: ProductData[] = [...products];
     const seen = new Set(result.map((p) => p.id));
     for (const p of loadedList) {
@@ -4762,27 +4836,20 @@ function Extension() {
     init();
   }, []);
 
-  // Map an applied search term to the query string sent to the Shopify `products` query. Advanced
-  // boolean expressions are NOT valid Shopify search syntax, so in advanced mode we send an empty
-  // server query (the server returns the default newest-first page, which still grows the loaded set
-  // that the client-side boolean filter evaluates against). Simple terms are passed through so the
-  // server does its normal indexed search; the client-side metafield augmentation adds to that.
-  const serverQueryFor = (term: string): string => (isAdvancedSearch(term) ? '' : term);
-
   const runSearch = (): void => {
     setAppliedSearch(productSearch);
-    fetchProducts(null, 'forward', serverQueryFor(productSearch));
+    fetchProducts(null, 'forward', productSearch);
   };
 
   const handleNextProducts = (): void => {
     if (productPageInfo?.hasNextPage) {
-      fetchProducts(productPageInfo.endCursor, 'forward', serverQueryFor(appliedSearch));
+      fetchProducts(productPageInfo.endCursor, 'forward', appliedSearch);
     }
   };
 
   const handlePrevProducts = (): void => {
     if (productPageInfo?.hasPreviousPage) {
-      fetchProducts(productPageInfo.startCursor, 'backward', serverQueryFor(appliedSearch));
+      fetchProducts(productPageInfo.startCursor, 'backward', appliedSearch);
     }
   };
 
@@ -4795,7 +4862,7 @@ function Extension() {
     try {
       await fetchTemplates();
       await loadSelections();
-      await fetchProducts(null, 'forward', serverQueryFor(appliedSearch));
+      await fetchProducts(null, 'forward', appliedSearch);
     } finally {
       setRefreshing(false);
     }
@@ -4920,20 +4987,11 @@ function Extension() {
   };
 
   // The products each bulk-select button targets: the CURRENT SERVER PAGE only (`products`), never
-  // products that only show up in the table via the client-side metafield/full-session search union
-  // (see displayedProducts above) -- so a button can never silently select something the merchant
-  // hasn't scrolled to. The one exception is advanced boolean search (`{{ }} && || !`): it has no
-  // server-side page at all (serverQueryFor sends an empty query for it, so `products` would still
-  // hold the unrelated default newest-first page), and every row the client-side boolean evaluator
-  // matched already IS the whole "page" in that mode -- so there, the buttons target
-  // `displayedProducts` directly, which is identical to what's rendered.
-  const bulkPageProducts: ProductData[] = isAdvancedSearch(appliedSearch)
-    ? displayedProducts
-    : products;
+  // products that only show up in the table via the client-side metafield search union (see
+  // displayedProducts above) -- so a button can never silently select something the merchant hasn't
+  // scrolled to.
   const bulkTargets = (mode: BulkSelectMode): ProductData[] =>
-    mode === 'shown'
-      ? bulkPageProducts
-      : bulkPageProducts.filter((p: ProductData) => (p.totalInventory ?? 0) > 0);
+    mode === 'shown' ? products : products.filter((p: ProductData) => (p.totalInventory ?? 0) > 0);
 
   const inStockDisplayedCount = bulkTargets('in-stock').length;
 
@@ -5016,10 +5074,17 @@ function Extension() {
     setEditorBody('');
     setEditorExtension('txt');
     setEditorFileBreak('variant');
+    setEditorMergeCondition('');
     setEditorTitleError(null);
     setEditorFileBreakError(null);
     setEditorError(null);
-    originalEditorRef.current = { title: '', body: '', extension: 'txt', fileBreak: 'variant' };
+    originalEditorRef.current = {
+      title: '',
+      body: '',
+      extension: 'txt',
+      fileBreak: 'variant',
+      mergeCondition: '',
+    };
     setView('editor');
   };
 
@@ -5031,6 +5096,7 @@ function Extension() {
     // `tpl.fileBreak` may be null (never explicitly chosen -- see TemplateData.fileBreak); left as
     // null here rather than substituted with a guess, so the dropdown visibly shows "not set".
     setEditorFileBreak(tpl.fileBreak);
+    setEditorMergeCondition(tpl.mergeCondition);
     setEditorTitleError(null);
     setEditorFileBreakError(null);
     setEditorError(null);
@@ -5039,6 +5105,7 @@ function Extension() {
       body: tpl.body,
       extension: tpl.extension || 'txt',
       fileBreak: tpl.fileBreak,
+      mergeCondition: tpl.mergeCondition,
     };
     setView('editor');
   };
@@ -5067,7 +5134,8 @@ function Extension() {
       editorTitle !== orig.title ||
       editorBody !== orig.body ||
       editorExtension !== orig.extension ||
-      editorFileBreak !== orig.fileBreak
+      editorFileBreak !== orig.fileBreak ||
+      editorMergeCondition !== orig.mergeCondition
     );
   };
 
@@ -5104,6 +5172,7 @@ function Extension() {
           pinned: existingIndex >= 0 ? currentList[existingIndex].pinned === true : false,
           pinnedAt: existingIndex >= 0 ? (currentList[existingIndex].pinnedAt ?? null) : null,
           fileBreak: editorFileBreak,
+          mergeCondition: editorMergeCondition,
         };
         return existingIndex >= 0
           ? currentList.map((t) => (t.id === savedTemplate.id ? savedTemplate : t))
@@ -5118,6 +5187,7 @@ function Extension() {
         body: editorBody,
         extension: editorExtension,
         fileBreak: editorFileBreak,
+        mergeCondition: editorMergeCondition,
       };
       setView('main');
     } catch (err: any) {
@@ -5312,6 +5382,7 @@ function Extension() {
           selectedProductList,
           noteObjects,
           tpl.fileBreak,
+          tpl.mergeCondition,
           primaryDomain,
           new Date(),
         );
@@ -5388,6 +5459,7 @@ function Extension() {
         selectedProductList,
         noteObjects,
         editorFileBreak,
+        editorMergeCondition,
         primaryDomain,
         new Date(),
       );
@@ -5400,6 +5472,7 @@ function Extension() {
     editorBody,
     editorExtension,
     editorFileBreak,
+    editorMergeCondition,
     selectedProductList,
     noteObjects,
     primaryDomain,
@@ -6035,6 +6108,21 @@ function Extension() {
                     Variant foreach
                   </s-button>
                   <s-button onClick={() => insertVariable(TAGS_LOOP_BLOCK)}>Tags foreach</s-button>
+                  <s-button onClick={() => insertVariable('{{ selection.next.product.title }}')}>
+                    Next object's field
+                  </s-button>
+                  <s-button onClick={() => insertVariable('{{ selection.prev.product.title }}')}>
+                    Previous object's field
+                  </s-button>
+                  <s-button onClick={() => insertVariable('{{ selection.next.type }}')}>
+                    Next object's type
+                  </s-button>
+                  <s-button onClick={() => insertVariable('{{ selection.prev.type }}')}>
+                    Previous object's type
+                  </s-button>
+                  <s-button onClick={() => insertVariable('{{ selection.curr.type }}')}>
+                    Current object's type
+                  </s-button>
                 </s-section>
                 <s-section heading="Variables">
                   <s-button onClick={() => insertVariable(ASSIGN_TOKEN)}>Assign variable</s-button>
@@ -6079,6 +6167,13 @@ function Extension() {
                 </s-section>
               </s-menu>
             </s-stack>
+
+            <s-text-field
+              label="Merge IF:"
+              value={editorMergeCondition}
+              details="A TRUE/FALSE condition (same grammar as an If block). TRUE merges the next object's output into the current file instead of starting a new one -- leave blank to never merge. Reference the current, next, and previous objects with {{ selection.curr/next/prev.product/variant.FIELD }} and {{ selection.curr/next/prev.type }} (empty when there is no next/previous object)."
+              onInput={(e: any) => setEditorMergeCondition(e.currentTarget.value)}
+            />
 
             <s-text-area
               label="Body"
@@ -6537,7 +6632,7 @@ function Extension() {
                   labelAccessibilityVisibility="exclusive"
                   icon="search"
                   autocomplete="off"
-                  placeholder="Search title, handle, tag, SKU, metafield… or use {{ }} && || ! for advanced search"
+                  placeholder="Search title, handle, tag, SKU, metafield…"
                   value={productSearch}
                   onInput={(e: any) => setProductSearch(e.currentTarget.value)}
                   onChange={runSearch}
@@ -6871,13 +6966,24 @@ function Extension() {
       </s-grid>
 
       <s-modal id="note-modal" heading="New note">
-        <s-text-area
-          label="Note"
-          value={noteDraftText}
-          rows={6}
-          placeholder="Type your note…"
-          onInput={(e: any) => setNoteDraftText(e.currentTarget.value)}
-        />
+        <s-stack gap="small">
+          <s-text-area
+            label="Note"
+            value={noteDraftText}
+            rows={6}
+            placeholder="Type your note…"
+            onInput={(e: any) => setNoteDraftText(e.currentTarget.value)}
+          />
+          {/* Lives in the modal BODY, not the secondary-actions footer slot: that slot only
+              accepts button components with variant "secondary" or "auto" (per the s-modal
+              reference), so a third, lower-emphasis "tertiary" button placed there was an
+              invalid child -- and, being slotted ahead of Discard, prevented Discard from
+              rendering at all. Clearing the draft without closing the modal doesn't need to be
+              a footer action anyway. */}
+          <s-button variant="tertiary" onClick={discardNoteDraft}>
+            Clear note
+          </s-button>
+        </s-stack>
         <s-button
           slot="primary-action"
           variant="primary"
@@ -6894,9 +7000,6 @@ function Extension() {
           onClick={appendSearchToNote}
         >
           Add search query
-        </s-button>
-        <s-button slot="secondary-actions" variant="tertiary" onClick={discardNoteDraft}>
-          Clear note
         </s-button>
         <s-button
           slot="secondary-actions"
