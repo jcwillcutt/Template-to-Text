@@ -3777,14 +3777,24 @@ function planCombined(
   // Session 9: the first selection-scope foreach's iterated item list, partitioned into groups by
   // the template's Merge IF condition -- replaces the old size-based i=0<N chunking (see
   // expandForeachBlocks' deprecation of that syntax). No foreach block at all -> always exactly 1
-  // file, same as before. An empty Merge IF -> every item is its own "group," but since there's only
-  // ever ONE partition run (not one per item), that still collapses to a single, ungrouped file here
-  // -- matching the pre-session-9 default of "chunking is off unless you opt in."
+  // file, same as before.
+  //
+  // BUG FIXED (session 12): an EMPTY Merge IF must still mean exactly 1 file for 'selection' mode --
+  // matching the pre-session-9 default of "chunking is off unless you opt in." partitionByMergeCondition
+  // itself is correct and shared: an empty condition makes it put every item in its own group (which
+  // IS the right default for the four per-unit fileBreak modes, where "no merging" means "one file
+  // per unit"). But for 'selection' mode, one file per ITERATED ITEM is never the right default -- a
+  // selection with, say, 12 products and an untouched (empty) Merge IF was being split into a 12-file
+  // ZIP instead of the single combined file it always used to produce, because `grouped` below never
+  // checked whether Merge IF was actually SET before trusting `groups.length`. The fix is this
+  // `mergeCondition.trim() !== ''` guard -- mirroring the guard `planOutputFiles`' per-unit branch
+  // already had correctly (`merging = mergeCondition.trim() !== ''`), which this call site was
+  // missing.
   const iteratedItems = firstForeachIteratedItems(withoutComments, rows, notes);
   const groups = iteratedItems
     ? partitionByMergeCondition(iteratedItems, mergeCondition, selectionLength, primaryDomain, now)
     : null;
-  const grouped = groups != null && groups.length > 1;
+  const grouped = mergeCondition.trim() !== '' && groups != null && groups.length > 1;
   const fileCount = grouped ? (groups as number[][]).length : 1;
 
   // No neighbor/position is defined OUTSIDE a selection-scope foreach loop at the top level of
@@ -6447,13 +6457,6 @@ function Extension() {
               </s-menu>
             </s-stack>
 
-            <s-text-field
-              label="Merge IF:"
-              value={editorMergeCondition}
-              details="A TRUE/FALSE condition (same grammar as an If block). TRUE merges the next object's output into the current file instead of starting a new one -- leave blank to never merge. Reference the current, next, and previous objects with {{ selection.curr/next/prev.product/variant.FIELD }} and {{ selection.curr/next/prev.type }} (empty when there is no next/previous object)."
-              onInput={(e: any) => setEditorMergeCondition(e.currentTarget.value)}
-            />
-
             <s-text-area
               label="Body"
               labelAccessibilityVisibility="exclusive"
@@ -6463,6 +6466,13 @@ function Extension() {
               placeholder="Write your template. Place {{ insert }} where you want to insert a variable, then select it from the menu above."
               autocomplete="off"
               onInput={(e: any) => setEditorBody(e.currentTarget.value)}
+            />
+
+            <s-text-field
+              label="Merge IF:"
+              value={editorMergeCondition}
+              details="A TRUE/FALSE condition (same grammar as an If block). TRUE merges the next object's output into the current file instead of starting a new one -- leave blank to never merge. Reference the current, next, and previous objects with {{ selection.curr/next/prev.product/variant.FIELD }} and {{ selection.curr/next/prev.type }} (empty when there is no next/previous object)."
+              onInput={(e: any) => setEditorMergeCondition(e.currentTarget.value)}
             />
 
             <s-text-field
