@@ -854,8 +854,16 @@ const IF_BLOCK = '{{ #if={{ =0 }} }}\n{{ /if }}';
 // starting value of the step counter exposed as {{ j }} inside the condition.
 const CHOP_BLOCK = '{{ #chop={{ {{j}}==3 }}, direction=L, j=1 }}\n{{/chop}}';
 
-// Snippet inserted by the "String length" menu option: renders the character count of its argument.
-const LENGTH_TOKEN = '{{ length={{ product.title }} }}';
+// Snippet inserted by the "String length" menu option: renders the character count of its content.
+// Block form (session 10) -- see LENGTH_OPEN_SOURCE's comment for why this replaced {{ length=... }}.
+const LENGTH_TOKEN = '{{ #length }}{{ product.title }}{{/length}}';
+
+// Snippets inserted by the date/time menu options (session 9) -- see formatDateTime's comment for
+// the full JungleDocs-style token table these format strings are written in.
+const DATE_TOKEN = '{{ time=MM/dd/yyyy }}';
+const TIME_TOKEN = '{{ time=h:mm tt }}';
+const DATE_TIME_TOKEN = '{{ time=MM/dd/yyyy h:mm tt }}';
+const WEEKDAY_DATE_TOKEN = '{{ time=dddd, MMMM d, yyyy }}';
 
 // Snippet inserted by the "Repeat block" menu option: outputs its inner content N times, joined by
 // the delineator (empty by default).
@@ -895,6 +903,13 @@ const NOTES_LOOP_BLOCK = '{{ #notes.foreach note, i=0 }}\n{{ product.note }}\n{{
 // label after `tags.foreach`, which is cosmetic, same as every other foreach source).
 const TAGS_LOOP_BLOCK = '{{ #tags.foreach tag, i=0 }}\n{{ tag }}\n{{/tags.foreach}}';
 
+// Snippet inserted by the "Metafields foreach" menu option (new, session 10): steps through the
+// current product/row's metafields. Each iteration's namespace/key/value are read via the fixed
+// {{ mf.namespace }}/{{ mf.key }}/{{ mf.value }} tokens (not the label after `metafields.foreach`,
+// which is cosmetic, same as every other foreach source).
+const METAFIELDS_LOOP_BLOCK =
+  '{{ #metafields.foreach mf, i=0 }}\n{{ mf.namespace }}.{{ mf.key }}: {{ mf.value }}\n{{/metafields.foreach}}';
+
 // Snippet inserted by the "Boolean equation" menu option.
 const BOOLEAN_TOKEN = '{{ TRUE != FALSE }}';
 
@@ -908,46 +923,150 @@ const SKIP_TOKEN_BLOCK = '{{ #if={{ =0 }} }}\n{{ skip }}\n{{ /if }}';
 // Hard safety cap on while-loop iterations, on top of the required MIN/MAX bounds.
 const MAX_WHILE_ITERATIONS = 10000;
 
-// Abbreviated weekday names indexed by Date.getDay() (0 = Sunday).
-const WEEKDAY_ABBR = ['sun', 'mon', 'tues', 'wed', 'thurs', 'fri', 'sat'];
-// Abbreviated month names indexed by Date.getMonth() (0 = January).
-const MONTH_ABBR = [
-  'jan',
-  'feb',
-  'mar',
-  'apr',
-  'may',
-  'june',
-  'july',
-  'aug',
-  'sept',
-  'oct',
-  'nov',
-  'dec',
+// Weekday/month names for {{ time=FORMAT }} (session 9), spelled the standard way (Jan, not this
+// file's own old irregular 'june'/'july'/'sept' abbreviations -- see formatDateTime's comment for
+// why standard spelling was chosen deliberately over reusing this file's pre-existing convention).
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tues', 'Wed', 'Thurs', 'Fri', 'Sat'];
+const WEEKDAY_FULL = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+];
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_FULL = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
 ];
 
-// Precomputed date-token string values, derived once per download from a single Date so every file
-// in one download shares the same date. `day`/`month` are zero-padded to two digits.
-interface DateParts {
-  day: string;
-  dayWeek: string;
-  month: string;
-  monthName: string;
-  year: string;
-  yearShort: string;
+// Format one run of the SAME format-letter (e.g. "MMMM", "hh") against a Date, following the
+// JungleDocs / .NET custom date-format token table -- see formatDateTime's comment for the full
+// list. Returns the run itself, unchanged, for any letter not in that table (defensive; every
+// caller only ever invokes this on a run whose first letter was already checked to be recognized).
+function formatDateToken(date: Date, run: string): string {
+  const letter = run[0];
+  const len = run.length;
+  const pad = (n: number, width: number): string => String(Math.abs(n)).padStart(width, '0');
+  switch (letter) {
+    case 'd':
+      if (len >= 4) return WEEKDAY_FULL[date.getDay()];
+      if (len === 3) return WEEKDAY_SHORT[date.getDay()];
+      if (len === 2) return pad(date.getDate(), 2);
+      return String(date.getDate());
+    case 'M':
+      if (len >= 4) return MONTH_FULL[date.getMonth()];
+      if (len === 3) return MONTH_SHORT[date.getMonth()];
+      if (len === 2) return pad(date.getMonth() + 1, 2);
+      return String(date.getMonth() + 1);
+    case 'y': {
+      const fullYear = date.getFullYear();
+      if (len >= 3) return String(fullYear);
+      const twoDigit = ((fullYear % 100) + 100) % 100;
+      return len === 2 ? pad(twoDigit, 2) : String(twoDigit);
+    }
+    case 'h': {
+      const hour24 = date.getHours();
+      const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+      return len >= 2 ? pad(hour12, 2) : String(hour12);
+    }
+    case 'H':
+      return len >= 2 ? pad(date.getHours(), 2) : String(date.getHours());
+    case 'm':
+      return len >= 2 ? pad(date.getMinutes(), 2) : String(date.getMinutes());
+    case 's':
+      return len >= 2 ? pad(date.getSeconds(), 2) : String(date.getSeconds());
+    case 't': {
+      const isPM = date.getHours() >= 12;
+      return len >= 2 ? (isPM ? 'PM' : 'AM') : isPM ? 'P' : 'A';
+    }
+    case 'f':
+    case 'F': {
+      // Real precision stops at milliseconds (3 digits); padded with zeros out to `len` (max 7,
+      // matching the table's f..fffffff range). 'F' additionally drops trailing zero digits.
+      const msDigits = (pad(date.getMilliseconds(), 3) + '0000').slice(0, len);
+      return letter === 'F' ? msDigits.replace(/0+$/, '') : msDigits;
+    }
+    case 'K':
+    case 'z': {
+      // JS reports getTimezoneOffset() as minutes BEHIND UTC (positive west of UTC) -- inverted
+      // from the conventional +HH:mm offset notation, so the sign is flipped here.
+      const offsetMinutes = -date.getTimezoneOffset();
+      const sign = offsetMinutes < 0 ? '-' : '+';
+      const absMinutes = Math.abs(offsetMinutes);
+      const offsetHours = Math.floor(absMinutes / 60);
+      const remainderMinutes = absMinutes % 60;
+      if (letter === 'K' || len >= 3) {
+        return `${sign}${pad(offsetHours, 2)}:${pad(remainderMinutes, 2)}`;
+      }
+      return len === 2 ? `${sign}${pad(offsetHours, 2)}` : `${sign}${offsetHours}`;
+    }
+    default:
+      return run;
+  }
 }
 
-function computeDateParts(date: Date): DateParts {
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  const fullYear = date.getFullYear();
-  return {
-    day: pad(date.getDate()),
-    dayWeek: WEEKDAY_ABBR[date.getDay()],
-    month: pad(date.getMonth() + 1),
-    monthName: MONTH_ABBR[date.getMonth()],
-    year: String(fullYear),
-    yearShort: String(fullYear).slice(-2),
-  };
+// {{ time=FORMAT }} (session 9): format the current render's captured date/time using JungleDocs-
+// style custom date-format patterns (https://help-jungledocs.enovapoint.com/article/714-date-
+// formatting-formulas -- itself the .NET custom date/time format string grammar). Recognized
+// letters, each read as a RUN of repeated occurrences (so "MM" and "MMMM" are different tokens,
+// not "M" twice):
+//   d/dd            day of month, no/with leading zero          M/MM      month, no/with leading zero
+//   ddd/dddd        weekday name, abbreviated/full                MMM/MMMM  month name, abbreviated/full
+//   h/hh            12-hour hour, no/with leading zero            H/HH      24-hour hour, no/with leading zero
+//   m/mm            minutes, no/with leading zero                 s/ss      seconds, no/with leading zero
+//   t/tt            AM/PM, abbreviated (A/P) / full (AM/PM)        y/yy/yyy(y) year: unpadded 2-digit /
+//                                                                             padded 2-digit / full 4-digit
+//   f..fffffff      fractional seconds, zero-padded (real precision stops at milliseconds)
+//   F..FFFFFFF      same, with trailing zero digits dropped
+//   K, z/zz/zzz     time zone offset (K and zzz are always +HH:mm; z/zz are +H / +HH)
+// Any other character (including `:` and `/`) passes through literally. Wrap literal text that
+// would otherwise be misread as a token in single or double quotes: 'at' or "at".
+// Example: {{ time=dddd, MMMM d, yyyy }}  ->  Tuesday, March 3, 2026
+function formatDateTime(date: Date, format: string): string {
+  const isTokenLetter = (ch: string): boolean => 'dMyHhmstKzfF'.includes(ch);
+  let result = '';
+  let i = 0;
+  while (i < format.length) {
+    const ch = format[i];
+    if (ch === "'" || ch === '"') {
+      const closeIndex = format.indexOf(ch, i + 1);
+      if (closeIndex === -1) {
+        result += format.slice(i + 1);
+        i = format.length;
+      } else {
+        result += format.slice(i + 1, closeIndex);
+        i = closeIndex + 1;
+      }
+      continue;
+    }
+    if (isTokenLetter(ch)) {
+      let run = ch;
+      let j = i + 1;
+      while (format[j] === ch) {
+        run += ch;
+        j += 1;
+      }
+      result += formatDateToken(date, run);
+      i = j;
+      continue;
+    }
+    result += ch;
+    i += 1;
+  }
+  return result;
 }
 
 const WRAP_BLOCK = '{{#wrap=80, min_wraps=0, max_wraps=0, hard=FALSE, delineator=}}\n{{/wrap}}';
@@ -1123,13 +1242,15 @@ interface KindedRow {
 
 // Per-render evaluation context: the current loop counter value (`i`), the total number of products
 // the merchant selected (`selectionLength`), the shop's primary domain host (`primaryDomain`), and
-// the precomputed date-token values (`date`). Threaded through token substitution and math evaluation
-// so `{{ i }}`, `{{ selection.length }}`, `{{ primaryDomain }}`, date tokens, and equations can all
-// read these values.
+// the single Date captured for this download (`now`, formatted on demand by {{ time=FORMAT }} --
+// session 9; was a precomputed `DateParts` struct before this session, when the only date tokens
+// were the fixed set now deprecated in resolveOnProduct). Threaded through token substitution and
+// math evaluation so `{{ i }}`, `{{ selection.length }}`, `{{ primaryDomain }}`, `{{ time=... }}`,
+// and equations can all read these values.
 interface EvalContext {
   selectionLength: number;
   primaryDomain: string;
-  date: DateParts;
+  now: Date;
   // The shared, MUTABLE variable store for this file render. Every variable (i, j, k, l, x, y, z plus
   // any counter name bound by a while loop) lives here as a string and defaults to EMPTY. Loops and
   // `{{ x = ... }}` assignments write to this same object, so a value written inside a nested loop
@@ -1145,6 +1266,14 @@ interface EvalContext {
   currKind: RowKind;
   prev: KindedRow | null;
   next: KindedRow | null;
+  // Session 10: the metafield currently being iterated by a `{{ #metafields.foreach }}` block, read
+  // via the fixed `{{ mf.namespace }}`/`{{ mf.key }}`/`{{ mf.value }}` tokens (see
+  // resolveOnProduct) -- the same "fixed token name, cosmetic label" convention `{{ tag }}` inside
+  // `tags.foreach` already established. OPTIONAL, unlike currKind/prev/next above: this is a much
+  // more narrowly-scoped feature, so rather than touch every EvalContext construction site in the
+  // file, this is simply left `undefined` everywhere except applyMetafieldsLoop, which is exactly
+  // when `{{ mf.* }}` should resolve to '' anyway (there's no current metafield to report).
+  currentMetafield?: MetafieldData | null;
 }
 
 // The variable names offered in the Variables menu, as convenient shortcuts -- variables are NOT
@@ -1181,6 +1310,16 @@ function resolveOnProduct(product: ProductData, parts: string[], ctx: EvalContex
     const stored = ctx.vars[parts[0]];
     return stored == null ? '' : stored;
   }
+  // {{ mf.namespace }} / {{ mf.key }} / {{ mf.value }} (session 10): the metafield currently being
+  // iterated by a {{ #metafields.foreach }} block -- see EvalContext.currentMetafield's comment.
+  // Resolves to '' outside such a loop (ctx.currentMetafield is undefined/null there).
+  if (parts.length === 2 && parts[0] === 'mf') {
+    if (!ctx.currentMetafield) return '';
+    if (parts[1] === 'namespace') return ctx.currentMetafield.namespace;
+    if (parts[1] === 'key') return ctx.currentMetafield.key;
+    if (parts[1] === 'value') return ctx.currentMetafield.value;
+    return '';
+  }
   // Number of variants on the product (always the FULL variant list, even inside a row clone).
   if (parts.length === 2 && parts[0] === 'product' && parts[1] === 'length') {
     const list =
@@ -1201,23 +1340,34 @@ function resolveOnProduct(product: ProductData, parts: string[], ctx: EvalContex
   if (parts.length === 1 && parts[0] === 'primaryDomain') {
     return ctx.primaryDomain;
   }
+  // RETIRED (session 9), per explicit direction: these six fixed date tokens are replaced by the
+  // single, far more versatile {{ time=FORMAT }} token (see formatDateTime) -- still detected here
+  // so a template using one renders a visible deprecatedSyntaxMarker instead of silently going blank
+  // (the DateParts/computeDateParts values these used to read no longer exist at all -- EvalContext
+  // now carries the raw `now: Date` that {{ time=FORMAT }} formats on demand instead).
   if (parts.length === 1 && parts[0] === 'day') {
-    return ctx.date.day;
+    return deprecatedSyntaxMarker('the bare day token is retired -- use the time=dd token instead');
   }
   if (parts.length === 2 && parts[0] === 'day' && parts[1] === 'week') {
-    return ctx.date.dayWeek;
+    return deprecatedSyntaxMarker(
+      'the day.week token is retired -- use the time=ddd token instead',
+    );
   }
   if (parts.length === 1 && parts[0] === 'month') {
-    return ctx.date.month;
+    return deprecatedSyntaxMarker('the bare month token is retired -- use the time=MM token instead');
   }
   if (parts.length === 2 && parts[0] === 'month' && parts[1] === 'name') {
-    return ctx.date.monthName;
+    return deprecatedSyntaxMarker(
+      'the month.name token is retired -- use the time=MMM token instead',
+    );
   }
   if (parts.length === 1 && parts[0] === 'year') {
-    return ctx.date.year;
+    return deprecatedSyntaxMarker('the bare year token is retired -- use the time=yyyy token instead');
   }
   if (parts.length === 2 && parts[0] === 'year' && parts[1] === 'short') {
-    return ctx.date.yearShort;
+    return deprecatedSyntaxMarker(
+      'the year.short token is retired -- use the time=yy token instead',
+    );
   }
   if (parts.length === 2 && parts[0] === 'selection' && parts[1] === 'length') {
     return String(ctx.selectionLength);
@@ -1341,6 +1491,8 @@ const RESERVED_ASSIGNMENT_NAMES = new Set([
   'break',
   'skip',
   'tag',
+  // Added session 9, with the {{ time=FORMAT }} token:
+  'time',
 ]);
 
 // Cross-check list for the reminder above: every keyword actually introduced by a
@@ -1371,6 +1523,7 @@ const RESERVED_KEYWORDS_IN_USE = [
   'break',
   'skip',
   'tag',
+  'time',
 ];
 for (const keyword of RESERVED_KEYWORDS_IN_USE) {
   if (!RESERVED_ASSIGNMENT_NAMES.has(keyword)) {
@@ -1399,6 +1552,8 @@ const IDENTIFIER_REGEX = /^[^\s{}.=<>!&|,()]+$/;
 const ASSIGNMENT_REGEX = /^([^\s{}.=<>!&|,()]+)\s*=(?!=)/;
 // RESERVED KEYWORD: 'length' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
 const LENGTH_PREFIX_REGEX = /^length\s*=/;
+// RESERVED KEYWORD: 'time' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
+const TIME_PREFIX_REGEX = /^time\s*=/;
 
 // Shared brace-depth scanner underlying topLevelEqualsIndex, topLevelLessThanIndex,
 // hasBooleanOperator, and splitTopLevelCommas below -- previously each of the four hand-rolled its
@@ -1518,17 +1673,31 @@ function renderTokenContent(
     }
     return numeric ? '0' : '';
   }
-  // Character count {{ length=STRING }}.
+  // RETIRED (session 10), per explicit direction: {{ length=STRING }} is replaced by the block form
+  // {{ #length }}STRING{{/length}} (see the 'length' case in renderTokens' dispatch), for consistency
+  // with every other text tool (chop/repeat/index/insert/wrap), which are all block-shaped rather
+  // than a bare `tag=value` token. Still DETECTED here so a template using the old form renders a
+  // visible deprecatedSyntaxMarker instead of a length count.
   const lengthMatch = trimmed.match(LENGTH_PREFIX_REGEX);
   if (lengthMatch) {
-    const argument = renderTemplateText(
-      trimmed.slice(lengthMatch[0].length),
+    return deprecatedSyntaxMarker(
+      'the length=STRING token is retired -- use {{ #length }}STRING{{ /length }} instead',
+    );
+  }
+  // Formatted date/time {{ time=FORMAT }} (session 9). Replaces the old bare {{ day }}/{{ month }}/
+  // {{ year }}/{{ day.week }}/{{ month.name }}/{{ year.short }} tokens (now deprecated, see
+  // resolveOnProduct) with one far more versatile token using JungleDocs-style date-format patterns
+  // -- see formatDateTime's own comment for the full token table.
+  const timeMatch = trimmed.match(TIME_PREFIX_REGEX);
+  if (timeMatch) {
+    const format = renderTemplateText(
+      trimmed.slice(timeMatch[0].length),
       product,
       allProducts,
       ctx,
       false,
     );
-    return String(Array.from(argument.trim()).length);
+    return formatDateTime(ctx.now, format);
   }
   // Variable assignment {{ name = VALUE }}: writes the shared store and renders nothing.
   const assignmentMatch = trimmed.match(ASSIGNMENT_REGEX);
@@ -2101,6 +2270,28 @@ const VARIANT_LOOP_CLOSE_SOURCE = /\{\{\s*\/(?:variants?\.foreach|product\.forea
 // RESERVED KEYWORD: 'tag' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
 const TAGS_LOOP_OPEN_SOURCE = /\{\{\s*#tags\.foreach(?:\s+[^\s,{}]+)?/.source;
 const TAGS_LOOP_CLOSE_SOURCE = /\{\{\s*\/tags\.foreach\s*\}\}/.source;
+// `{{ #metafields.foreach [LABEL], i=0 }}` (session 10): steps through the CURRENT product/row's
+// metafields -- product-level only (a variant's own metafields, if it has any, are a separate,
+// deliberately NOT-built tier; see roadmap.md item 7). Same cosmetic-LABEL convention as every other
+// foreach source: the LABEL is not bound to anything. The loop item is read via three FIXED tokens,
+// `{{ mf.namespace }}`/`{{ mf.key }}`/`{{ mf.value }}` (see EvalContext.currentMetafield), the same
+// "fixed token name, cosmetic label" shape `{{ tag }}` inside `tags.foreach` already established --
+// this also resolves the notation question roadmap.md item 7 left open (explicit
+// `product.metafields.foreach` vs. inferred `metafields.foreach`) by following that same precedent:
+// inferred/bare, consistent with `tags.foreach`/`variants.foreach` already meaning "of the current
+// product" with no explicit prefix.
+const METAFIELDS_LOOP_OPEN_SOURCE = /\{\{\s*#metafields\.foreach(?:\s+[^\s,{}]+)?/.source;
+const METAFIELDS_LOOP_CLOSE_SOURCE = /\{\{\s*\/metafields\.foreach\s*\}\}/.source;
+// `{{ #length }}STRING{{/length}}` (session 10): block form of the character-count tool, replacing
+// `{{ length=STRING }}` (now deprecated -- see renderTokenContent) for consistency with every other
+// text tool (chop/repeat/index/insert/wrap), which are all `{{ #tag=... }} ... {{/tag}}` blocks, not
+// a bare `tag=value` token. No `=` and no parameters at all -- `findBlockOpen`'s `params` capture
+// (whatever sits between "#length" and the tag's own closing `}}`) is always just whitespace here,
+// and is intentionally never read. `\b` (word boundary) after "length" prevents a hypothetical future
+// tag whose name merely starts with "length" from being misread as this one.
+// RESERVED KEYWORD: 'length' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
+const LENGTH_OPEN_SOURCE = /\{\{\s*#length\b/.source;
+const LENGTH_CLOSE_SOURCE = /\{\{\s*\/length\s*\}\}/.source;
 
 function findInsertBlock(body: string, fromIndex: number): TaggedBlock | null {
   return findTaggedBlock(body, fromIndex, INSERT_OPEN_SOURCE, INSERT_CLOSE_SOURCE);
@@ -2112,6 +2303,14 @@ function findVariantLoopBlock(body: string, fromIndex: number): TaggedBlock | nu
 
 function findTagsLoopBlock(body: string, fromIndex: number): TaggedBlock | null {
   return findTaggedBlock(body, fromIndex, TAGS_LOOP_OPEN_SOURCE, TAGS_LOOP_CLOSE_SOURCE);
+}
+
+function findMetafieldsLoopBlock(body: string, fromIndex: number): TaggedBlock | null {
+  return findTaggedBlock(body, fromIndex, METAFIELDS_LOOP_OPEN_SOURCE, METAFIELDS_LOOP_CLOSE_SOURCE);
+}
+
+function findLengthBlock(body: string, fromIndex: number): TaggedBlock | null {
+  return findTaggedBlock(body, fromIndex, LENGTH_OPEN_SOURCE, LENGTH_CLOSE_SOURCE);
 }
 
 // Parse the insert tag parameters: the character position N (first top-level comma segment) and the
@@ -2254,6 +2453,64 @@ function applyVariantLoop(
     if (!signal.discard) output += rendered;
     if (signal.stop) break;
   }
+  return output;
+}
+
+// Parse the metafields-loop tag parameters: just an optional counter (`i=START`), same shape as the
+// tags loop -- see parseTagsLoopParams' comment (identical reasoning, one word substituted).
+function parseMetafieldsLoopParams(
+  rawParams: string,
+  product: ProductData,
+  allProducts: ProductData[],
+  ctx: EvalContext,
+): { start: number; name: string } {
+  const segments = splitTopLevelCommas(rawParams);
+  let start = 0;
+  let name = 'i';
+  for (const segment of segments) {
+    const eqIndex = segment.indexOf('=');
+    if (eqIndex === -1) continue;
+    const key = segment.slice(0, eqIndex).trim();
+    const value = segment.slice(eqIndex + 1).trim();
+    if (isVariableName(key)) {
+      name = key;
+      const resolved = resolveExprToNumber(value, product, allProducts, ctx);
+      start = resolved == null ? 0 : Math.round(resolved);
+    }
+  }
+  return { start, name };
+}
+
+// Render a metafields-loop block: steps through the CURRENT product/row's metafields
+// (product.metafields), binding each one into `ctx.currentMetafield` (read via the fixed
+// `{{ mf.namespace }}`/`{{ mf.key }}`/`{{ mf.value }}` tokens -- see EvalContext.currentMetafield's
+// comment) for the duration of that one iteration, plus an optional counter (`{{ i }}` by default).
+// A product with no metafields renders the inner content zero times. Supports `{{ break }}`/
+// `{{ skip }}` like every other loop -- see BREAK_SENTINEL's comment. Saves/restores
+// `ctx.currentMetafield` around its own iterations (same reasoning as expandForeachBlocks' save/
+// restore of currKind/prev/next): a NESTED metafields loop, or a plain `{{ mf.* }}` token written
+// after this block in the same body, must not see a stale value left over from this loop's last
+// iteration.
+function applyMetafieldsLoop(
+  inner: string,
+  params: { start: number; name: string },
+  product: ProductData,
+  allProducts: ProductData[],
+  ctx: EvalContext,
+): string {
+  const metafields = product.metafields || [];
+  const savedMetafield = ctx.currentMetafield;
+  let output = '';
+  for (let index = 0; index < metafields.length; index++) {
+    const counterValue = index === 0 ? params.start : readVarNumber(ctx.vars, params.name) + 1;
+    ctx.vars[params.name] = String(counterValue);
+    ctx.currentMetafield = metafields[index];
+    const rendered = renderTokens(inner, product, allProducts, ctx);
+    const signal = loopControlSignal(rendered);
+    if (!signal.discard) output += rendered;
+    if (signal.stop) break;
+  }
+  ctx.currentMetafield = savedMetafield;
   return output;
 }
 
@@ -2419,9 +2676,18 @@ function applyWhileLoop(
   return output;
 }
 
-// Locate the next chop / repeat / index / insert / variants / tags / while block at or after
-// `fromIndex`, whichever starts earliest.
-type RenderBlockKind = 'chop' | 'repeat' | 'index' | 'insert' | 'variants' | 'tags' | 'while';
+// Locate the next chop / repeat / index / insert / variants / tags / metafields / length / while
+// block at or after `fromIndex`, whichever starts earliest.
+type RenderBlockKind =
+  | 'chop'
+  | 'repeat'
+  | 'index'
+  | 'insert'
+  | 'variants'
+  | 'tags'
+  | 'metafields'
+  | 'length'
+  | 'while';
 
 interface RenderBlock extends TaggedBlock {
   kind: RenderBlockKind;
@@ -2447,6 +2713,10 @@ function findNextRenderBlock(body: string, fromIndex: number): RenderBlock | nul
   if (variantLoop) candidates.push({ ...variantLoop, kind: 'variants' });
   const tagsLoop = findTagsLoopBlock(body, fromIndex);
   if (tagsLoop) candidates.push({ ...tagsLoop, kind: 'tags' });
+  const metafieldsLoop = findMetafieldsLoopBlock(body, fromIndex);
+  if (metafieldsLoop) candidates.push({ ...metafieldsLoop, kind: 'metafields' });
+  const lengthBlock = findLengthBlock(body, fromIndex);
+  if (lengthBlock) candidates.push({ ...lengthBlock, kind: 'length' });
   const loop = findWhileBlock(body, fromIndex);
   if (loop) candidates.push({ ...loop, kind: 'while' });
   if (candidates.length === 0) return null;
@@ -2845,6 +3115,12 @@ function renderTokens(
     } else if (match.kind === 'tags') {
       const tagsParams = parseTagsLoopParams(match.params, product, list, ctx);
       result += applyTagsLoop(match.inner, tagsParams, product, allProducts, ctx);
+    } else if (match.kind === 'metafields') {
+      const metafieldsParams = parseMetafieldsLoopParams(match.params, product, list, ctx);
+      result += applyMetafieldsLoop(match.inner, metafieldsParams, product, allProducts, ctx);
+    } else if (match.kind === 'length') {
+      const innerRendered = renderTokens(match.inner, product, allProducts, ctx);
+      result += String(Array.from(innerRendered.trim()).length);
     } else {
       const loopParams = parseWhileParams(match.params);
       if (loopParams.form === 'deprecated') {
@@ -3446,7 +3722,7 @@ function partitionByMergeCondition(
   mergeCondition: string,
   selectionLength: number,
   primaryDomain: string,
-  date: DateParts,
+  now: Date,
 ): number[][] {
   const groups: number[][] = [];
   if (items.length === 0) return groups;
@@ -3458,7 +3734,7 @@ function partitionByMergeCondition(
       const probeCtx: EvalContext = {
         selectionLength,
         primaryDomain,
-        date,
+        now,
         vars: createVarStore(),
         currKind: items[i].kind,
         prev: i > 0 ? items[i - 1] : null,
@@ -3492,7 +3768,7 @@ function planCombined(
   mergeCondition: string,
   selectionLength: number,
   primaryDomain: string,
-  date: DateParts,
+  now: Date,
 ): { fileCount: number; render: (fileIndex: number | null) => string } {
   const rows = expandSelectionToRows(products);
   const first = rows[0];
@@ -3506,7 +3782,7 @@ function planCombined(
   // -- matching the pre-session-9 default of "chunking is off unless you opt in."
   const iteratedItems = firstForeachIteratedItems(withoutComments, rows, notes);
   const groups = iteratedItems
-    ? partitionByMergeCondition(iteratedItems, mergeCondition, selectionLength, primaryDomain, date)
+    ? partitionByMergeCondition(iteratedItems, mergeCondition, selectionLength, primaryDomain, now)
     : null;
   const grouped = groups != null && groups.length > 1;
   const fileCount = grouped ? (groups as number[][]).length : 1;
@@ -3528,7 +3804,7 @@ function planCombined(
     const baseCtx: EvalContext = {
       selectionLength,
       primaryDomain,
-      date,
+      now,
       vars: createVarStore(),
       ...topLevelCtx(),
     };
@@ -3568,12 +3844,12 @@ function evaluateSingle(
   next: KindedRow | null,
   selectionLength: number,
   primaryDomain: string,
-  date: DateParts,
+  now: Date,
 ): string {
   const baseCtx: EvalContext = {
     selectionLength,
     primaryDomain,
-    date,
+    now,
     vars: createVarStore(),
     currKind: current.kind,
     prev,
@@ -3940,7 +4216,6 @@ function planOutputFiles(
   }
   const ext = sanitizeExtension(templateExtension);
   const titleSlug = slugify(templateTitle);
-  const dateParts = computeDateParts(now);
   const timestamp = formatTimestamp(now);
   // {{ selection.length }} has always meant the number of PRODUCTS selected; that meaning is
   // unchanged by fileBreak, and by notes being selected alongside them.
@@ -3958,7 +4233,7 @@ function planOutputFiles(
       mergeCondition,
       selectionLength,
       primaryDomain,
-      dateParts,
+      now,
     );
     if (combined.fileCount <= 1) {
       const name =
@@ -4030,7 +4305,7 @@ function planOutputFiles(
     mergeCondition,
     selectionLength,
     primaryDomain,
-    dateParts,
+    now,
   );
   const merging = mergeCondition.trim() !== '';
   const renderGroup = (group: number[]): string =>
@@ -4043,7 +4318,7 @@ function planOutputFiles(
           unitIndex < kindedUnits.length - 1 ? kindedUnits[unitIndex + 1] : null,
           selectionLength,
           primaryDomain,
-          dateParts,
+          now,
         ),
       )
       .join('');
@@ -6108,6 +6383,9 @@ function Extension() {
                     Variant foreach
                   </s-button>
                   <s-button onClick={() => insertVariable(TAGS_LOOP_BLOCK)}>Tags foreach</s-button>
+                  <s-button onClick={() => insertVariable(METAFIELDS_LOOP_BLOCK)}>
+                    Metafields foreach
+                  </s-button>
                   <s-button onClick={() => insertVariable('{{ selection.next.product.title }}')}>
                     Next object's field
                   </s-button>
@@ -6156,11 +6434,12 @@ function Extension() {
                     New line
                   </s-button>
                   <s-button onClick={() => insertVariable(SPACE_TOKEN_SNIPPET)}>Space</s-button>
-                  <s-button onClick={() => insertVariable('{{ day }}')}>Day (2-digit)</s-button>
-                  <s-button onClick={() => insertVariable('{{ month }}')}>Month (2-digit)</s-button>
-                  <s-button onClick={() => insertVariable('{{ year }}')}>Year (4-digit)</s-button>
-                  <s-button onClick={() => insertVariable('{{ day.week }}')}>Day of week</s-button>
-                  <s-button onClick={() => insertVariable('{{ month.name }}')}>Month name</s-button>
+                  <s-button onClick={() => insertVariable(DATE_TOKEN)}>Date</s-button>
+                  <s-button onClick={() => insertVariable(TIME_TOKEN)}>Time</s-button>
+                  <s-button onClick={() => insertVariable(DATE_TIME_TOKEN)}>Date and time</s-button>
+                  <s-button onClick={() => insertVariable(WEEKDAY_DATE_TOKEN)}>
+                    Weekday, month day, year
+                  </s-button>
                   <s-button onClick={() => insertVariable('{{ primaryDomain }}')}>
                     Shop primary domain
                   </s-button>
