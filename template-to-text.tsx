@@ -869,6 +869,11 @@ const WEEKDAY_DATE_TOKEN = '{{ time=dddd, MMMM d, yyyy }}';
 // the delineator (empty by default).
 const REPEAT_BLOCK = '{{ #repeat=2, delineator= }}\n{{/repeat}}';
 
+// Snippet inserted by the "Replace" menu option (session 13): replaces every occurrence of the
+// search text in its inner content with the replacement text. Both values are left blank in the
+// inserted snippet so the author fills them in -- see parseReplaceParams/applyReplace.
+const REPLACE_BLOCK = '{{ #replace=, replacement= }}\n{{/replace}}';
+
 // Snippet inserted by the "While loop" menu option: a loop that re-tests a boolean condition every
 // step (up to a hard MAX_WHILE_ITERATIONS safety cap) and does not step through the product
 // selection. It MUST be closed with {{/while}}. This is the new, recommended `{{ #while=BOOL }}`
@@ -890,7 +895,8 @@ const INSERT_BLOCK = '{{ #insert=0, drop=FALSE }}\n{{/insert}}';
 // `product.foreach` spelling (no label slot) still works forever as a plain alias. The label after
 // `variants.foreach` (here `v`) is purely cosmetic, like `selection.foreach`'s trailing word -- the
 // loop item is always read via the existing `{{ variant.* }}` tokens, not the label.
-const VARIANT_LOOP_BLOCK = '{{ #variants.foreach v, l=0 }}\n{{ variant.title }}\n{{/variants.foreach}}';
+const VARIANT_LOOP_BLOCK =
+  '{{ #variants.foreach v, l=0 }}\n{{ variant.title }}\n{{/variants.foreach}}';
 
 // Snippet inserted by the "Notes foreach" menu option (new, session 6): steps through the
 // selection's free-standing notes. Every {{ product.* }}/{{ variant.* }} token except
@@ -927,16 +933,21 @@ const MAX_WHILE_ITERATIONS = 10000;
 // file's own old irregular 'june'/'july'/'sept' abbreviations -- see formatDateTime's comment for
 // why standard spelling was chosen deliberately over reusing this file's pre-existing convention).
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tues', 'Wed', 'Thurs', 'Fri', 'Sat'];
-const WEEKDAY_FULL = [
-  'Sunday',
-  'Monday',
-  'Tuesday',
-  'Wednesday',
-  'Thursday',
-  'Friday',
-  'Saturday',
+const WEEKDAY_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_SHORT = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
 ];
-const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTH_FULL = [
   'January',
   'February',
@@ -1202,9 +1213,8 @@ const PRODUCT_FIELD_RESOLVERS: Record<string, (product: ProductData) => string> 
   return map;
 })();
 
-const VARIANT_FIELD_RESOLVERS: Record<string, (variant: VariantData) => string> = Object.fromEntries(
-  VARIANT_FIELD_DEFS.map((f) => [f.key, f.resolve]),
-);
+const VARIANT_FIELD_RESOLVERS: Record<string, (variant: VariantData) => string> =
+  Object.fromEntries(VARIANT_FIELD_DEFS.map((f) => [f.key, f.resolve]));
 
 function productFieldValue(product: ProductData, field: string): string {
   const resolve = PRODUCT_FIELD_RESOLVERS[field];
@@ -1334,7 +1344,11 @@ function resolveOnProduct(product: ProductData, parts: string[], ctx: EvalContex
   // "products" needs its own small special case here for full note/notes x product/products
   // coverage. Session 7: 'note' is the canonical field spelling; 'notes' stays supported for any
   // already-saved template.
-  if (parts.length === 2 && parts[0] === 'products' && (parts[1] === 'note' || parts[1] === 'notes')) {
+  if (
+    parts.length === 2 &&
+    parts[0] === 'products' &&
+    (parts[1] === 'note' || parts[1] === 'notes')
+  ) {
     return product.note || '';
   }
   if (parts.length === 1 && parts[0] === 'primaryDomain') {
@@ -1354,7 +1368,9 @@ function resolveOnProduct(product: ProductData, parts: string[], ctx: EvalContex
     );
   }
   if (parts.length === 1 && parts[0] === 'month') {
-    return deprecatedSyntaxMarker('the bare month token is retired -- use the time=MM token instead');
+    return deprecatedSyntaxMarker(
+      'the bare month token is retired -- use the time=MM token instead',
+    );
   }
   if (parts.length === 2 && parts[0] === 'month' && parts[1] === 'name') {
     return deprecatedSyntaxMarker(
@@ -1362,7 +1378,9 @@ function resolveOnProduct(product: ProductData, parts: string[], ctx: EvalContex
     );
   }
   if (parts.length === 1 && parts[0] === 'year') {
-    return deprecatedSyntaxMarker('the bare year token is retired -- use the time=yyyy token instead');
+    return deprecatedSyntaxMarker(
+      'the bare year token is retired -- use the time=yyyy token instead',
+    );
   }
   if (parts.length === 2 && parts[0] === 'year' && parts[1] === 'short') {
     return deprecatedSyntaxMarker(
@@ -1432,9 +1450,17 @@ function resolveTokenExpr(
   // EvalContext.currKind/prev/next's comment). `curr` is always defined (it's just `product`/
   // `ctx.currKind`, the row already being rendered); `next`/`prev` are null at the last/first
   // position, which is exactly when these resolve to '' -- no neighbor to describe.
-  if (parts[0] === 'selection' && (parts[1] === 'curr' || parts[1] === 'next' || parts[1] === 'prev')) {
+  if (
+    parts[0] === 'selection' &&
+    (parts[1] === 'curr' || parts[1] === 'next' || parts[1] === 'prev')
+  ) {
     const slot = parts[1];
-    const neighbor = slot === 'curr' ? { row: product, kind: ctx.currKind } : slot === 'next' ? ctx.next : ctx.prev;
+    const neighbor =
+      slot === 'curr'
+        ? { row: product, kind: ctx.currKind }
+        : slot === 'next'
+          ? ctx.next
+          : ctx.prev;
     if (!neighbor) return '';
     if (parts[2] === 'type' && parts.length === 3) {
       return neighbor.kind;
@@ -1493,6 +1519,9 @@ const RESERVED_ASSIGNMENT_NAMES = new Set([
   'tag',
   // Added session 9, with the {{ time=FORMAT }} token:
   'time',
+  // Added session 13, with the replace block:
+  'replace',
+  'replacement',
 ]);
 
 // Cross-check list for the reminder above: every keyword actually introduced by a
@@ -1524,6 +1553,8 @@ const RESERVED_KEYWORDS_IN_USE = [
   'skip',
   'tag',
   'time',
+  'replace',
+  'replacement',
 ];
 for (const keyword of RESERVED_KEYWORDS_IN_USE) {
   if (!RESERVED_ASSIGNMENT_NAMES.has(keyword)) {
@@ -2231,6 +2262,11 @@ const REPEAT_CLOSE_SOURCE = /\{\{\s*\/repeat\s*\}\}/.source;
 // fallback: an old template using this form needs to be opened and updated.
 const WHILE_OPEN_SOURCE = /\{\{\s*#?while=/.source;
 const WHILE_CLOSE_SOURCE = /\{\{\s*\/while\s*\}\}/.source;
+// RESERVED KEYWORD: 'replace', plus its parameter 'replacement' -- must stay listed in
+// RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE. (See IF_OPEN_SOURCE's comment for why these
+// are real-regex-literal `.source`, not plain string literals.)
+const REPLACE_OPEN_SOURCE = /\{\{\s*#replace=/.source;
+const REPLACE_CLOSE_SOURCE = /\{\{\s*\/replace\s*\}\}/.source;
 // RESERVED KEYWORD: 'index' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
 const INDEX_OPEN_SOURCE = /\{\{\s*#index=/.source;
 const INDEX_CLOSE_SOURCE = /\{\{\s*\/index\s*\}\}/.source;
@@ -2245,6 +2281,10 @@ function findWhileBlock(body: string, fromIndex: number): TaggedBlock | null {
 
 function findIndexBlock(body: string, fromIndex: number): TaggedBlock | null {
   return findTaggedBlock(body, fromIndex, INDEX_OPEN_SOURCE, INDEX_CLOSE_SOURCE);
+}
+
+function findReplaceBlock(body: string, fromIndex: number): TaggedBlock | null {
+  return findTaggedBlock(body, fromIndex, REPLACE_OPEN_SOURCE, REPLACE_CLOSE_SOURCE);
 }
 
 // RESERVED KEYWORD: 'insert' -- must stay listed in RESERVED_ASSIGNMENT_NAMES / RESERVED_KEYWORDS_IN_USE.
@@ -2262,7 +2302,8 @@ const INSERT_CLOSE_SOURCE = /\{\{\s*\/insert\s*\}\}/.source;
 // `variant(s).foreach` (like `selection.foreach`'s trailing word) is purely cosmetic/for readability
 // -- it is not bound to anything; the loop item is always read via the existing `{{ variant.* }}`
 // tokens, same as before.
-const VARIANT_LOOP_OPEN_SOURCE = /\{\{\s*#(?:variants?\.foreach(?:\s+[^\s,{}]+)?|product\.foreach)/.source;
+const VARIANT_LOOP_OPEN_SOURCE = /\{\{\s*#(?:variants?\.foreach(?:\s+[^\s,{}]+)?|product\.foreach)/
+  .source;
 const VARIANT_LOOP_CLOSE_SOURCE = /\{\{\s*\/(?:variants?\.foreach|product\.foreach)\s*\}\}/.source;
 // `{{ #tags.foreach [LABEL], i=0 }}` (new, session 6): steps through the CURRENT product/row's tags.
 // The optional LABEL is purely cosmetic, same as every other foreach source's trailing word -- the
@@ -2306,7 +2347,12 @@ function findTagsLoopBlock(body: string, fromIndex: number): TaggedBlock | null 
 }
 
 function findMetafieldsLoopBlock(body: string, fromIndex: number): TaggedBlock | null {
-  return findTaggedBlock(body, fromIndex, METAFIELDS_LOOP_OPEN_SOURCE, METAFIELDS_LOOP_CLOSE_SOURCE);
+  return findTaggedBlock(
+    body,
+    fromIndex,
+    METAFIELDS_LOOP_OPEN_SOURCE,
+    METAFIELDS_LOOP_CLOSE_SOURCE,
+  );
 }
 
 function findLengthBlock(body: string, fromIndex: number): TaggedBlock | null {
@@ -2448,7 +2494,12 @@ function applyVariantLoop(
     // `name = name + 1` against the CURRENT stored value, so counts carry across nested loops.
     const value = index === 0 ? params.start : readVarNumber(ctx.vars, params.name) + 1;
     ctx.vars[params.name] = String(value);
-    const rendered = renderTokens(inner, { ...product, variants: [iterated[index]] }, allProducts, ctx);
+    const rendered = renderTokens(
+      inner,
+      { ...product, variants: [iterated[index]] },
+      allProducts,
+      ctx,
+    );
     const signal = loopControlSignal(rendered);
     if (!signal.discard) output += rendered;
     if (signal.stop) break;
@@ -2624,6 +2675,52 @@ function applyRepeat(innerRendered: string, count: number | null, delineator: st
   return copies.join(delineator);
 }
 
+// Parse the replace tag parameters: the SEARCH text (everything before the first `replacement=`,
+// trailing comma stripped) and the REPLACEMENT text (everything after that `replacement=` up to the
+// tag's closing `}}`, so it may itself contain commas) -- the same split shape parseRepeatParams
+// already uses for its `delineator=` value. Both sides may contain nested `{{ }}` tokens, which are
+// resolved here before the replacement runs, and both are trimmed of TYPED whitespace only:
+// whitespace produced by the {{ /space }} / {{ /return }} tokens is carried as sentinels (which are
+// not whitespace) and therefore survives the trim at any position, so token whitespace can be both
+// searched for and inserted.
+function parseReplaceParams(
+  rawParams: string,
+  product: ProductData,
+  allProducts: ProductData[],
+  ctx: EvalContext,
+): { search: string; replacement: string } {
+  const raw = String(rawParams);
+  const replacementMatch = raw.match(/replacement\s*=/);
+  let searchPart = raw;
+  let replacementPart = '';
+  if (replacementMatch && replacementMatch.index != null) {
+    searchPart = raw.slice(0, replacementMatch.index);
+    replacementPart = raw.slice(replacementMatch.index + replacementMatch[0].length);
+  }
+  const search = renderTemplateText(
+    searchPart.replace(/,\s*$/, ''),
+    product,
+    allProducts,
+    ctx,
+    false,
+  ).trim();
+  const replacement = renderTemplateText(replacementPart, product, allProducts, ctx, false).trim();
+  return { search, replacement };
+}
+
+// Replace EVERY occurrence of `search` in the (already rendered) text with `replacement`. Plain,
+// case-sensitive, non-overlapping substring replacement scanning left to right -- the same rule
+// .NET's String.Replace uses, which is what split/join gives for free: once a match is consumed the
+// scan resumes AFTER it, so a second match that overlapped the first is not itself replaced. An
+// empty search matches nothing (returning the text unchanged) rather than splitting between every
+// character; an empty replacement simply deletes each occurrence.
+function applyReplace(text: string, search: string, replacement: string): string {
+  if (search === '') {
+    return text;
+  }
+  return text.split(search).join(replacement);
+}
+
 // Parsed while-tag parameters. Only ONE form is now run: 'unbounded' (`{{ #while=BOOL }}`) -- just a
 // condition, no bound counter. Iterates up to MAX_WHILE_ITERATIONS times, re-testing the condition
 // before every step; a counter, if wanted, is the author's own ordinary variable, declared/
@@ -2634,9 +2731,7 @@ function applyRepeat(innerRendered: string, count: number | null, delineator: st
 // 'deprecated', rather than either running the old semantics forever or falling through to the
 // generic pass-through and rendering completely raw tags (the same silent-failure shape the session-6
 // regex bug had).
-type WhileParams =
-  | { form: 'unbounded'; condition: string }
-  | { form: 'deprecated' };
+type WhileParams = { form: 'unbounded'; condition: string } | { form: 'deprecated' };
 
 // Parse the while tag parameters. A rawParams string with no top-level comma is the (only supported)
 // unbounded form -- the whole thing is the condition. One WITH a top-level comma is the old
@@ -2665,7 +2760,10 @@ function applyWhileLoop(
 ): string {
   let output = '';
   for (let step = 0; step < MAX_WHILE_ITERATIONS; step++) {
-    if (params.condition.trim() !== '' && !conditionIsTrue(params.condition, product, allProducts, ctx)) {
+    if (
+      params.condition.trim() !== '' &&
+      !conditionIsTrue(params.condition, product, allProducts, ctx)
+    ) {
       break;
     }
     const rendered = renderTokens(inner, product, allProducts, ctx);
@@ -2676,11 +2774,12 @@ function applyWhileLoop(
   return output;
 }
 
-// Locate the next chop / repeat / index / insert / variants / tags / metafields / length / while
-// block at or after `fromIndex`, whichever starts earliest.
+// Locate the next chop / repeat / replace / index / insert / variants / tags / metafields / length /
+// while block at or after `fromIndex`, whichever starts earliest.
 type RenderBlockKind =
   | 'chop'
   | 'repeat'
+  | 'replace'
   | 'index'
   | 'insert'
   | 'variants'
@@ -2705,6 +2804,8 @@ function findNextRenderBlock(body: string, fromIndex: number): RenderBlock | nul
     });
   const repeat = findRepeatBlock(body, fromIndex);
   if (repeat) candidates.push({ ...repeat, kind: 'repeat' });
+  const replaceBlock = findReplaceBlock(body, fromIndex);
+  if (replaceBlock) candidates.push({ ...replaceBlock, kind: 'replace' });
   const indexBlock = findIndexBlock(body, fromIndex);
   if (indexBlock) candidates.push({ ...indexBlock, kind: 'index' });
   const insertBlock = findInsertBlock(body, fromIndex);
@@ -3092,6 +3193,10 @@ function renderTokens(
       const { count, delineator } = parseRepeatParams(match.params, product, list, ctx);
       const innerRendered = renderTokens(match.inner, product, allProducts, ctx);
       result += applyRepeat(innerRendered, count, delineator);
+    } else if (match.kind === 'replace') {
+      const { search, replacement } = parseReplaceParams(match.params, product, list, ctx);
+      const innerRendered = renderTokens(match.inner, product, allProducts, ctx);
+      result += applyReplace(innerRendered, search, replacement);
     } else if (match.kind === 'index') {
       const position = resolveExprToNumber(match.params, product, list, ctx);
       const innerRendered = renderTokens(match.inner, product, allProducts, ctx);
@@ -3519,7 +3624,12 @@ function findSelectionScopeForeachBlock(
     PRODUCTS_FOREACH_CLOSE_SOURCE,
   );
   if (productsBlock) candidates.push({ ...productsBlock, kind: 'rows' });
-  const notesBlock = findTaggedBlock(body, fromIndex, NOTES_FOREACH_OPEN_SOURCE, NOTES_FOREACH_CLOSE_SOURCE);
+  const notesBlock = findTaggedBlock(
+    body,
+    fromIndex,
+    NOTES_FOREACH_OPEN_SOURCE,
+    NOTES_FOREACH_CLOSE_SOURCE,
+  );
   if (notesBlock) candidates.push({ ...notesBlock, kind: 'notes' });
   if (candidates.length === 0) return null;
   return candidates.reduce((earliest, candidate) =>
@@ -3571,7 +3681,8 @@ function itemListForForeachKind(
   contextRowKind: RowKind,
   notes: SelectionEntry[],
 ): KindedRow[] {
-  const notesAsRows = (): KindedRow[] => notes.map((n) => ({ row: noteToPseudoProduct(n), kind: 'note' }));
+  const notesAsRows = (): KindedRow[] =>
+    notes.map((n) => ({ row: noteToPseudoProduct(n), kind: 'note' }));
   const rowsAsKinded = (): KindedRow[] => contextRows.map((row) => ({ row, kind: contextRowKind }));
   if (kind === 'notes') return notesAsRows();
   if (kind === 'object') return [...rowsAsKinded(), ...notesAsRows()];
@@ -3603,7 +3714,8 @@ function expandForeachBlocks(
     const opts = parseForeachOptions(match.params);
     const fullItemList = itemListForForeachKind(match.kind, contextRows, contextRowKind, notes);
     const resolveContext = fullItemList[0]?.row ?? contextRows[0];
-    const startBase = resolveExprToNumber(opts.startExpr, resolveContext, contextRows, baseCtx) ?? 0;
+    const startBase =
+      resolveExprToNumber(opts.startExpr, resolveContext, contextRows, baseCtx) ?? 0;
     const startIndex = Math.round(startBase);
     const filteredFull = foreachSelection(fullItemList, opts.skipFirst, opts.skipLast);
     // DEPRECATED (session 9): the old `i=START<MAX` chunk-size sub-syntax is retired -- the
@@ -3672,7 +3784,12 @@ function expandForeachBlocks(
         baseCtx,
         null,
       );
-      const iterationText = renderTokens(expandedInner, filteredFull[idx].row, contextRows, baseCtx);
+      const iterationText = renderTokens(
+        expandedInner,
+        filteredFull[idx].row,
+        contextRows,
+        baseCtx,
+      );
       const signal = loopControlSignal(iterationText);
       if (!signal.discard) rendered += iterationText;
       if (signal.stop) break;
@@ -3740,7 +3857,12 @@ function partitionByMergeCondition(
         prev: i > 0 ? items[i - 1] : null,
         next: items[i + 1],
       };
-      merge = conditionIsTrue(condition, items[i].row, items.map((it) => it.row), probeCtx);
+      merge = conditionIsTrue(
+        condition,
+        items[i].row,
+        items.map((it) => it.row),
+        probeCtx,
+      );
     }
     if (merge) {
       current.push(i + 1);
@@ -3871,7 +3993,14 @@ function evaluateSingle(
   // unchanged from always-existing behavior; `notes.foreach` has nothing to iterate here (there is
   // no selection-wide notes list threaded into per-unit rendering) and simply renders zero times --
   // not a regression, since this combination was never possible before this session either.
-  const expanded = expandForeachBlocks(preparedBody, [current.row], current.kind, [], baseCtx, null);
+  const expanded = expandForeachBlocks(
+    preparedBody,
+    [current.row],
+    current.kind,
+    [],
+    baseCtx,
+    null,
+  );
   const substituted = renderTokens(expanded, current.row, [current.row], baseCtx);
   // restoreWhitespaceTokens is the LAST step: turn any remaining whitespace sentinels (outside wrap
   // blocks) into real newlines / spaces.
@@ -4271,14 +4400,20 @@ function planOutputFiles(
   // Every other mode renders one unit -- a variant row, a whole product, a note, or a mix of
   // products then notes -- through evaluateSingle against a shared preprocessed body (see
   // evaluateSingle's comment for why that's computed once here rather than once per unit).
-  const preparedBody = flattenForeachInsideWhile(stripComments(applyWhitespaceTokens(templateBody)));
+  const preparedBody = flattenForeachInsideWhile(
+    stripComments(applyWhitespaceTokens(templateBody)),
+  );
   let units: RenderUnit[];
   if (fileBreak === 'variant') {
     // One file per variant row -- the long-standing default behavior.
     units = expandSelectionToRows(products).map((row) => {
       const rowVariant = row.variants[0];
       const variantSuffix = rowVariant ? `_${slugify(rowVariant.title)}` : '';
-      return { row, kind: 'variant' as RowKind, baseName: `${row.handle}${variantSuffix}_${titleSlug}` };
+      return {
+        row,
+        kind: 'variant' as RowKind,
+        baseName: `${row.handle}${variantSuffix}_${titleSlug}`,
+      };
     });
   } else if (fileBreak === 'product') {
     units = productUnits(products, titleSlug);
@@ -4665,7 +4800,9 @@ function Extension() {
   // currentSelectionOrderIndex ('current') or selectionSlotOrderIndex[slot] (a public slot), and
   // extended (via nextSelectionOrderIndex) whenever addMainSelectionToDraft merges more items in.
   // Session 8 -- see currentSelectionOrderIndex's comment for the map-not-array reasoning.
-  const [selectionViewOrderIndex, setSelectionViewOrderIndex] = useState<Record<string, number>>({});
+  const [selectionViewOrderIndex, setSelectionViewOrderIndex] = useState<Record<string, number>>(
+    {},
+  );
   const [selectionBaseline, setSelectionBaseline] = useState<string>('');
   const [selectionSearch, setSelectionSearch] = useState('');
   const [selectionLoading, setSelectionLoading] = useState(false);
@@ -4774,7 +4911,10 @@ function Extension() {
   const selectedProductList = useMemo(
     () =>
       Object.values<ProductData>(selectedProducts).map((p) =>
-        narrowToSelectedVariants({ ...p, note: productNotes[p.id] || '' }, selectedVariantIds[p.id]),
+        narrowToSelectedVariants(
+          { ...p, note: productNotes[p.id] || '' },
+          selectedVariantIds[p.id],
+        ),
       ),
     [selectedProducts, productNotes, selectedVariantIds],
   );
@@ -5105,7 +5245,9 @@ function Extension() {
       }
       setSelectionEntries(productEntries);
       setSelectionNotes(noteEntries);
-      setSelectionSlotOrderIndex(slotOrderIndex as Record<PublicSelectionSlotId, Record<string, number>>);
+      setSelectionSlotOrderIndex(
+        slotOrderIndex as Record<PublicSelectionSlotId, Record<string, number>>,
+      );
       setSelectionSubtitles(parseSubtitles(shop?.subs?.value));
     } catch (err: any) {
       setSelectionsError(err?.message || 'Failed to load saved selections.');
@@ -5258,7 +5400,8 @@ function Extension() {
     checked: boolean,
   ): void => {
     setSelectedVariantIds((prev: Record<string, string[]>) => {
-      const current = prev[productId] && prev[productId].length > 0 ? prev[productId] : allVariantIds;
+      const current =
+        prev[productId] && prev[productId].length > 0 ? prev[productId] : allVariantIds;
       let next: string[];
       if (checked) {
         if (current.includes(variantId)) return prev;
@@ -6041,7 +6184,11 @@ function Extension() {
   // only persisted when the merchant uses Save.
   const moveSelectionRow = (id: string, offset: number): void => {
     setSelectionError(null);
-    const combined = combineSelectionRows(selectionDraft, selectionNoteDraft, selectionViewOrderIndex);
+    const combined = combineSelectionRows(
+      selectionDraft,
+      selectionNoteDraft,
+      selectionViewOrderIndex,
+    );
     const index = combined.findIndex((row) => row.id === id);
     const target = index + offset;
     if (index === -1 || target < 0 || target >= combined.length) {
@@ -6265,7 +6412,9 @@ function Extension() {
     const term = selectionSearch.trim();
     if (term === '') return selectionCombinedAll;
     return selectionCombinedAll.filter((row: SelectionRow) =>
-      row.kind === 'product' ? productMatchesQuery(row.product, term) : noteMatchesQuery(row.note, term),
+      row.kind === 'product'
+        ? productMatchesQuery(row.product, term)
+        : noteMatchesQuery(row.note, term),
     );
   }, [selectionCombinedAll, selectionSearch]);
 
@@ -6277,559 +6426,558 @@ function Extension() {
   // handler declared above, so nothing about how they resolve values changed.
   // --------------------------------------------------------------------------------------------
   const renderEditorView = () => (
-      <s-page heading={editingTemplate ? 'Edit template' : 'New template'}>
-        {hasUnsavedChanges() ? (
-          <s-button slot="header-actions" icon="arrow-left" commandFor="leave-confirm-modal">
+    <s-page heading={editingTemplate ? 'Edit template' : 'New template'}>
+      {hasUnsavedChanges() ? (
+        <s-button slot="header-actions" icon="arrow-left" commandFor="leave-confirm-modal">
+          Back
+        </s-button>
+      ) : (
+        <s-button slot="header-actions" icon="arrow-left" onClick={backToMain}>
+          Back
+        </s-button>
+      )}
+
+      {editorError ? (
+        <s-banner tone="critical" heading="Could not save template">
+          <s-text>{editorError}</s-text>
+        </s-banner>
+      ) : null}
+
+      <s-section>
+        <s-stack gap="base">
+          <s-text-field
+            label="Title"
+            value={editorTitle}
+            error={editorTitleError || undefined}
+            onInput={(e: any) => setEditorTitle(e.currentTarget.value)}
+          />
+
+          <s-stack direction="inline" gap="base" justifyContent="space-between" alignItems="center">
+            <s-stack direction="inline" gap="small" alignItems="center">
+              <s-text type="strong">Body</s-text>
+              <s-text color="subdued">File break:</s-text>
+              <s-button
+                commandFor="file-break-menu"
+                tone={editorFileBreak === null ? 'critical' : undefined}
+              >
+                {editorFileBreak ? FILE_BREAK_LABELS[editorFileBreak] : 'Not set — choose one'}
+              </s-button>
+              <s-menu id="file-break-menu" accessibilityLabel="File break">
+                {FILE_BREAK_VALUES.map((value: FileBreak) => (
+                  <s-button
+                    key={value}
+                    icon={editorFileBreak === value ? 'check' : undefined}
+                    onClick={() => {
+                      setEditorFileBreak(value);
+                      setEditorFileBreakError(null);
+                    }}
+                  >
+                    {FILE_BREAK_LABELS[value]}
+                  </s-button>
+                ))}
+              </s-menu>
+              {editorFileBreakError ? (
+                <s-text tone="critical">{editorFileBreakError}</s-text>
+              ) : null}
+            </s-stack>
+            <s-stack direction="inline" gap="small" alignItems="center">
+              <s-button icon="plus" commandFor="insert-variable-menu">
+                Insert variable
+              </s-button>
+              <s-button icon="plus" commandFor="insert-special-menu">
+                Insert special
+              </s-button>
+            </s-stack>
+            <s-menu id="insert-variable-menu" accessibilityLabel="Insert variable">
+              <s-text color="subdued">
+                Selected variable replaces all instances of {INSERT_PLACEHOLDER}
+              </s-text>
+              <s-section heading="Product fields">
+                {PRODUCT_FIELD_TOKENS.map((t) => (
+                  <s-button key={t.token} onClick={() => insertVariable(t.token)}>
+                    {t.label}
+                  </s-button>
+                ))}
+              </s-section>
+              <s-section heading="Variant fields">
+                {VARIANT_FIELD_TOKENS.map((t) => (
+                  <s-button key={t.token} onClick={() => insertVariable(t.token)}>
+                    {t.label}
+                  </s-button>
+                ))}
+              </s-section>
+              {metafieldTokens.length > 0 ? (
+                <s-section heading="Metafields">
+                  {metafieldTokens.map((t) => (
+                    <s-button key={t.token} onClick={() => insertVariable(t.token)}>
+                      {t.label}
+                    </s-button>
+                  ))}
+                </s-section>
+              ) : null}
+            </s-menu>
+            <s-menu id="insert-special-menu" accessibilityLabel="Insert special">
+              <s-text color="subdued">
+                Selected variable replaces all instances of {INSERT_PLACEHOLDER}
+              </s-text>
+              <s-section heading="Selection">
+                <s-button onClick={() => insertVariable(FOREACH_BLOCK)}>For each loop</s-button>
+                <s-button onClick={() => insertVariable(NOTES_LOOP_BLOCK)}>Notes foreach</s-button>
+                <s-button onClick={() => insertVariable('{{ selection.length }}')}>
+                  Number of products selected
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ selection.first.product.handle }}')}>
+                  First product handle
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ selection.last.product.handle }}')}>
+                  Last product handle
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ product.length }}')}>
+                  Number of variants
+                </s-button>
+                <s-button onClick={() => insertVariable(VARIANT_LOOP_BLOCK)}>
+                  Variant foreach
+                </s-button>
+                <s-button onClick={() => insertVariable(TAGS_LOOP_BLOCK)}>Tags foreach</s-button>
+                <s-button onClick={() => insertVariable(METAFIELDS_LOOP_BLOCK)}>
+                  Metafields foreach
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ selection.next.product.title }}')}>
+                  Next object's field
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ selection.prev.product.title }}')}>
+                  Previous object's field
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ selection.next.type }}')}>
+                  Next object's type
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ selection.prev.type }}')}>
+                  Previous object's type
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ selection.curr.type }}')}>
+                  Current object's type
+                </s-button>
+              </s-section>
+              <s-section heading="Variables">
+                <s-button onClick={() => insertVariable(ASSIGN_TOKEN)}>Assign variable</s-button>
+                {VARIABLE_NAMES.map((name) => (
+                  <s-button key={name} onClick={() => insertVariable(`{{ ${name} }}`)}>
+                    Variable {name}
+                  </s-button>
+                ))}
+              </s-section>
+              <s-section heading="Functions">
+                <s-button onClick={() => insertVariable(WHILE_BLOCK)}>While loop</s-button>
+                <s-button onClick={() => insertVariable(CHOP_BLOCK)}>Chop block</s-button>
+                <s-button onClick={() => insertVariable(WRAP_BLOCK)}>Word wrap</s-button>
+                <s-button onClick={() => insertVariable(REPEAT_BLOCK)}>Repeat</s-button>
+                <s-button onClick={() => insertVariable(INDEX_BLOCK)}>Index</s-button>
+                <s-button onClick={() => insertVariable(INSERT_BLOCK)}>Insert block</s-button>
+                <s-button onClick={() => insertVariable(IF_BLOCK)}>If block</s-button>
+                <s-button onClick={() => insertVariable(REPLACE_BLOCK)}>Replace</s-button>
+                <s-button onClick={() => insertVariable(COMMENT_BLOCK)}>Comment block</s-button>
+                <s-button onClick={() => insertVariable(BREAK_TOKEN_BLOCK)}>Break</s-button>
+                <s-button onClick={() => insertVariable(SKIP_TOKEN_BLOCK)}>Skip</s-button>
+              </s-section>
+              <s-section heading="Functional tokens">
+                <s-button onClick={() => insertVariable('{{ =0 }}')}>Math equation</s-button>
+                <s-button onClick={() => insertVariable(BOOLEAN_TOKEN)}>Boolean equation</s-button>
+                <s-button onClick={() => insertVariable(LENGTH_TOKEN)}>String length</s-button>
+              </s-section>
+              <s-section heading="Special tokens">
+                <s-button onClick={() => insertVariable(NEWLINE_TOKEN_SNIPPET)}>New line</s-button>
+                <s-button onClick={() => insertVariable(SPACE_TOKEN_SNIPPET)}>Space</s-button>
+                <s-button onClick={() => insertVariable(DATE_TOKEN)}>Date</s-button>
+                <s-button onClick={() => insertVariable(TIME_TOKEN)}>Time</s-button>
+                <s-button onClick={() => insertVariable(DATE_TIME_TOKEN)}>Date and time</s-button>
+                <s-button onClick={() => insertVariable(WEEKDAY_DATE_TOKEN)}>
+                  Weekday, month day, year
+                </s-button>
+                <s-button onClick={() => insertVariable('{{ primaryDomain }}')}>
+                  Shop primary domain
+                </s-button>
+              </s-section>
+            </s-menu>
+          </s-stack>
+
+          <s-text-area
+            label="Body"
+            labelAccessibilityVisibility="exclusive"
+            value={editorBody}
+            rows={16}
+            maxLength={1000000}
+            placeholder="Write your template. Place {{ insert }} where you want to insert a variable, then select it from the menu above."
+            autocomplete="off"
+            onInput={(e: any) => setEditorBody(e.currentTarget.value)}
+          />
+
+          <s-text-field
+            label="Merge IF:"
+            value={editorMergeCondition}
+            details="Can be used to modify the file break behavior.  If evaluates to TRUE, the next file's text will be appended to the current file's text. If Empty or FALSE, the files do not merge. Can use variables, functions, and selection references in the selection using commands."
+            onInput={(e: any) => setEditorMergeCondition(e.currentTarget.value)}
+          />
+
+          <s-text-field
+            label="Extension"
+            value={editorExtension}
+            details="File extension for generated files, e.g. txt, csv, json, html."
+            onInput={(e: any) => setEditorExtension(e.currentTarget.value)}
+          />
+        </s-stack>
+      </s-section>
+
+      <s-stack direction="inline" gap="base" justifyContent="space-between">
+        <s-button variant="primary" loading={saving} onClick={saveTemplate}>
+          Save
+        </s-button>
+        <s-button
+          disabled={!canPreview}
+          commandFor="preview-modal"
+          command="--show"
+          onClick={openPreview}
+        >
+          Preview
+        </s-button>
+      </s-stack>
+
+      <s-modal id="preview-modal" heading="Preview" size="large">
+        <s-stack gap="base">
+          {preview.failed ? (
+            <s-banner tone="critical" heading="Could not build preview">
+              <s-text>
+                The preview could not be generated from this template and the selected products.
+              </s-text>
+            </s-banner>
+          ) : preview.files.length === 0 ? (
+            <s-text color="subdued">Select at least one product to preview this template.</s-text>
+          ) : (
+            <s-stack gap="base">
+              {preview.files.length > 1 ? (
+                <s-stack
+                  direction="inline"
+                  gap="small"
+                  alignItems="center"
+                  justifyContent="space-between"
+                >
+                  <s-button
+                    icon="chevron-left"
+                    accessibilityLabel="Previous file"
+                    disabled={previewPage === 0}
+                    onClick={showPreviousPreviewFile}
+                  />
+                  <s-text color="subdued">
+                    File {previewPage + 1} of {preview.files.length}:{' '}
+                    {preview.files[previewPage].name}
+                  </s-text>
+                  <s-button
+                    icon="chevron-right"
+                    accessibilityLabel="Next file"
+                    disabled={previewPage === preview.files.length - 1}
+                    onClick={showNextPreviewFile}
+                  />
+                </s-stack>
+              ) : (
+                <s-text color="subdued">{preview.files[previewPage].name}</s-text>
+              )}
+              <s-text-area
+                label="Preview content"
+                labelAccessibilityVisibility="exclusive"
+                value={preview.files[previewPage].content}
+                rows={18}
+                readOnly
+              />
+            </s-stack>
+          )}
+        </s-stack>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          commandFor="preview-modal"
+          command="--hide"
+        >
+          Close
+        </s-button>
+      </s-modal>
+
+      <s-modal id="leave-confirm-modal" heading="Unsaved changes">
+        <s-text>You have unsaved changes. Leave without saving?</s-text>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          tone="critical"
+          commandFor="leave-confirm-modal"
+          command="--hide"
+          onClick={confirmLeave}
+        >
+          Leave without saving
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          variant="secondary"
+          commandFor="leave-confirm-modal"
+          command="--hide"
+        >
+          Stay
+        </s-button>
+      </s-modal>
+    </s-page>
+  );
+
+  const renderSelectionView = () => (
+    <s-page heading={selectionSlotLabel(selectionSlot!)} inlineSize="large">
+      <s-stack slot="header-actions" direction="inline" gap="base">
+        {hasSelectionUnsavedChanges() ? (
+          <s-button icon="arrow-left" commandFor="selection-leave-modal">
             Back
           </s-button>
         ) : (
-          <s-button slot="header-actions" icon="arrow-left" onClick={backToMain}>
+          <s-button icon="arrow-left" onClick={backFromSelection}>
             Back
           </s-button>
         )}
+        <s-button onClick={clearSelectionDraft} disabled={selectionDraft.length === 0}>
+          Clear Selection
+        </s-button>
+        <s-button
+          onClick={loadSelectionIntoCurrent}
+          disabled={
+            isPublicSelection
+              ? checkedItemCount === 0
+              : selectionDraft.length === 0 && selectionNoteDraft.length === 0
+          }
+        >
+          Load Selection
+        </s-button>
+        <s-button
+          variant="primary"
+          disabled={selectedProductList.length === 0 && noteObjects.length === 0}
+          onClick={addMainSelectionToDraft}
+        >
+          Add to Selection
+        </s-button>
+        <s-button loading={selectionSaving} onClick={saveSelectionDraft}>
+          Save
+        </s-button>
+      </s-stack>
 
-        {editorError ? (
-          <s-banner tone="critical" heading="Could not save template">
-            <s-text>{editorError}</s-text>
-          </s-banner>
-        ) : null}
+      {selectionError ? (
+        <s-banner tone="critical" heading="Selection error">
+          <s-text>{selectionError}</s-text>
+        </s-banner>
+      ) : null}
 
-        <s-section>
+      {selectionMissing ? (
+        <s-banner tone="info" heading="Some products were skipped">
+          <s-text>Some products in this selection no longer exist and were skipped.</s-text>
+        </s-banner>
+      ) : null}
+
+      <s-section padding="none">
+        <s-box padding="base">
           <s-stack gap="base">
-            <s-text-field
-              label="Title"
-              value={editorTitle}
-              error={editorTitleError || undefined}
-              onInput={(e: any) => setEditorTitle(e.currentTarget.value)}
-            />
-
             <s-stack
               direction="inline"
               gap="base"
               justifyContent="space-between"
               alignItems="center"
             >
-              <s-stack direction="inline" gap="small" alignItems="center">
-                <s-text type="strong">Body</s-text>
-                <s-text color="subdued">File break:</s-text>
-                <s-button
-                  commandFor="file-break-menu"
-                  tone={editorFileBreak === null ? 'critical' : undefined}
-                >
-                  {editorFileBreak ? FILE_BREAK_LABELS[editorFileBreak] : 'Not set — choose one'}
-                </s-button>
-                <s-menu id="file-break-menu" accessibilityLabel="File break">
-                  {FILE_BREAK_VALUES.map((value: FileBreak) => (
-                    <s-button
-                      key={value}
-                      icon={editorFileBreak === value ? 'check' : undefined}
-                      onClick={() => {
-                        setEditorFileBreak(value);
-                        setEditorFileBreakError(null);
-                      }}
-                    >
-                      {FILE_BREAK_LABELS[value]}
-                    </s-button>
-                  ))}
-                </s-menu>
-                {editorFileBreakError ? <s-text tone="critical">{editorFileBreakError}</s-text> : null}
-              </s-stack>
-              <s-stack direction="inline" gap="small" alignItems="center">
-                <s-button icon="plus" commandFor="insert-variable-menu">
-                  Insert variable
-                </s-button>
-                <s-button icon="plus" commandFor="insert-special-menu">
-                  Insert special
-                </s-button>
-              </s-stack>
-              <s-menu id="insert-variable-menu" accessibilityLabel="Insert variable">
-                <s-text color="subdued">
-                  Selected variable replaces all instances of {INSERT_PLACEHOLDER}
-                </s-text>
-                <s-section heading="Product fields">
-                  {PRODUCT_FIELD_TOKENS.map((t) => (
-                    <s-button key={t.token} onClick={() => insertVariable(t.token)}>
-                      {t.label}
-                    </s-button>
-                  ))}
-                </s-section>
-                <s-section heading="Variant fields">
-                  {VARIANT_FIELD_TOKENS.map((t) => (
-                    <s-button key={t.token} onClick={() => insertVariable(t.token)}>
-                      {t.label}
-                    </s-button>
-                  ))}
-                </s-section>
-                {metafieldTokens.length > 0 ? (
-                  <s-section heading="Metafields">
-                    {metafieldTokens.map((t) => (
-                      <s-button key={t.token} onClick={() => insertVariable(t.token)}>
-                        {t.label}
-                      </s-button>
-                    ))}
-                  </s-section>
-                ) : null}
-              </s-menu>
-              <s-menu id="insert-special-menu" accessibilityLabel="Insert special">
-                <s-text color="subdued">
-                  Selected variable replaces all instances of {INSERT_PLACEHOLDER}
-                </s-text>
-                <s-section heading="Selection">
-                  <s-button onClick={() => insertVariable(FOREACH_BLOCK)}>For each loop</s-button>
-                  <s-button onClick={() => insertVariable(NOTES_LOOP_BLOCK)}>Notes foreach</s-button>
-                  <s-button onClick={() => insertVariable('{{ selection.length }}')}>
-                    Number of products selected
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ selection.first.product.handle }}')}>
-                    First product handle
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ selection.last.product.handle }}')}>
-                    Last product handle
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ product.length }}')}>
-                    Number of variants
-                  </s-button>
-                  <s-button onClick={() => insertVariable(VARIANT_LOOP_BLOCK)}>
-                    Variant foreach
-                  </s-button>
-                  <s-button onClick={() => insertVariable(TAGS_LOOP_BLOCK)}>Tags foreach</s-button>
-                  <s-button onClick={() => insertVariable(METAFIELDS_LOOP_BLOCK)}>
-                    Metafields foreach
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ selection.next.product.title }}')}>
-                    Next object's field
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ selection.prev.product.title }}')}>
-                    Previous object's field
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ selection.next.type }}')}>
-                    Next object's type
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ selection.prev.type }}')}>
-                    Previous object's type
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ selection.curr.type }}')}>
-                    Current object's type
-                  </s-button>
-                </s-section>
-                <s-section heading="Variables">
-                  <s-button onClick={() => insertVariable(ASSIGN_TOKEN)}>Assign variable</s-button>
-                  {VARIABLE_NAMES.map((name) => (
-                    <s-button key={name} onClick={() => insertVariable(`{{ ${name} }}`)}>
-                      Variable {name}
-                    </s-button>
-                  ))}
-                </s-section>
-                <s-section heading="Functions">
-                  <s-button onClick={() => insertVariable(WHILE_BLOCK)}>While loop</s-button>
-                  <s-button onClick={() => insertVariable(CHOP_BLOCK)}>Chop block</s-button>
-                  <s-button onClick={() => insertVariable(WRAP_BLOCK)}>Word wrap</s-button>
-                  <s-button onClick={() => insertVariable(REPEAT_BLOCK)}>Repeat</s-button>
-                  <s-button onClick={() => insertVariable(INDEX_BLOCK)}>Index</s-button>
-                  <s-button onClick={() => insertVariable(INSERT_BLOCK)}>Insert block</s-button>
-                  <s-button onClick={() => insertVariable(IF_BLOCK)}>If block</s-button>
-                  <s-button onClick={() => insertVariable(COMMENT_BLOCK)}>Comment block</s-button>
-                  <s-button onClick={() => insertVariable(BREAK_TOKEN_BLOCK)}>Break</s-button>
-                  <s-button onClick={() => insertVariable(SKIP_TOKEN_BLOCK)}>Skip</s-button>
-                </s-section>
-                <s-section heading="Functional tokens">
-                  <s-button onClick={() => insertVariable('{{ =0 }}')}>Math equation</s-button>
-                  <s-button onClick={() => insertVariable(BOOLEAN_TOKEN)}>
-                    Boolean equation
-                  </s-button>
-                  <s-button onClick={() => insertVariable(LENGTH_TOKEN)}>String length</s-button>
-                </s-section>
-                <s-section heading="Special tokens">
-                  <s-button onClick={() => insertVariable(NEWLINE_TOKEN_SNIPPET)}>
-                    New line
-                  </s-button>
-                  <s-button onClick={() => insertVariable(SPACE_TOKEN_SNIPPET)}>Space</s-button>
-                  <s-button onClick={() => insertVariable(DATE_TOKEN)}>Date</s-button>
-                  <s-button onClick={() => insertVariable(TIME_TOKEN)}>Time</s-button>
-                  <s-button onClick={() => insertVariable(DATE_TIME_TOKEN)}>Date and time</s-button>
-                  <s-button onClick={() => insertVariable(WEEKDAY_DATE_TOKEN)}>
-                    Weekday, month day, year
-                  </s-button>
-                  <s-button onClick={() => insertVariable('{{ primaryDomain }}')}>
-                    Shop primary domain
-                  </s-button>
-                </s-section>
-              </s-menu>
+              <s-heading>Items in this selection</s-heading>
+              <s-text color="subdued">
+                {selectionDraft.length} products · {selectionNoteDraft.length} notes
+              </s-text>
             </s-stack>
-
-            <s-text-area
-              label="Body"
-              labelAccessibilityVisibility="exclusive"
-              value={editorBody}
-              rows={16}
-              maxLength={1000000}
-              placeholder="Write your template. Place {{ insert }} where you want to insert a variable, then select it from the menu above."
-              autocomplete="off"
-              onInput={(e: any) => setEditorBody(e.currentTarget.value)}
-            />
-
-            <s-text-field
-              label="Merge IF:"
-              value={editorMergeCondition}
-              details="A TRUE/FALSE condition (same grammar as an If block). TRUE merges the next object's output into the current file instead of starting a new one -- leave blank to never merge. Reference the current, next, and previous objects with {{ selection.curr/next/prev.product/variant.FIELD }} and {{ selection.curr/next/prev.type }} (empty when there is no next/previous object)."
-              onInput={(e: any) => setEditorMergeCondition(e.currentTarget.value)}
-            />
-
-            <s-text-field
-              label="Extension"
-              value={editorExtension}
-              details="File extension for generated files, e.g. txt, csv, json, html."
-              onInput={(e: any) => setEditorExtension(e.currentTarget.value)}
-            />
-          </s-stack>
-        </s-section>
-
-        <s-stack direction="inline" gap="base" justifyContent="space-between">
-          <s-button variant="primary" loading={saving} onClick={saveTemplate}>
-            Save
-          </s-button>
-          <s-button
-            disabled={!canPreview}
-            commandFor="preview-modal"
-            command="--show"
-            onClick={openPreview}
-          >
-            Preview
-          </s-button>
-        </s-stack>
-
-        <s-modal id="preview-modal" heading="Preview" size="large">
-          <s-stack gap="base">
-            {preview.failed ? (
-              <s-banner tone="critical" heading="Could not build preview">
-                <s-text>
-                  The preview could not be generated from this template and the selected products.
-                </s-text>
-              </s-banner>
-            ) : preview.files.length === 0 ? (
-              <s-text color="subdued">Select at least one product to preview this template.</s-text>
-            ) : (
-              <s-stack gap="base">
-                {preview.files.length > 1 ? (
-                  <s-stack
-                    direction="inline"
-                    gap="small"
-                    alignItems="center"
-                    justifyContent="space-between"
-                  >
-                    <s-button
-                      icon="chevron-left"
-                      accessibilityLabel="Previous file"
-                      disabled={previewPage === 0}
-                      onClick={showPreviousPreviewFile}
-                    />
-                    <s-text color="subdued">
-                      File {previewPage + 1} of {preview.files.length}:{' '}
-                      {preview.files[previewPage].name}
-                    </s-text>
-                    <s-button
-                      icon="chevron-right"
-                      accessibilityLabel="Next file"
-                      disabled={previewPage === preview.files.length - 1}
-                      onClick={showNextPreviewFile}
-                    />
-                  </s-stack>
-                ) : (
-                  <s-text color="subdued">{preview.files[previewPage].name}</s-text>
-                )}
-                <s-text-area
-                  label="Preview content"
-                  labelAccessibilityVisibility="exclusive"
-                  value={preview.files[previewPage].content}
-                  rows={18}
-                  readOnly
-                />
-              </s-stack>
-            )}
-          </s-stack>
-          <s-button
-            slot="primary-action"
-            variant="primary"
-            commandFor="preview-modal"
-            command="--hide"
-          >
-            Close
-          </s-button>
-        </s-modal>
-
-        <s-modal id="leave-confirm-modal" heading="Unsaved changes">
-          <s-text>You have unsaved changes. Leave without saving?</s-text>
-          <s-button
-            slot="primary-action"
-            variant="primary"
-            tone="critical"
-            commandFor="leave-confirm-modal"
-            command="--hide"
-            onClick={confirmLeave}
-          >
-            Leave without saving
-          </s-button>
-          <s-button
-            slot="secondary-actions"
-            variant="secondary"
-            commandFor="leave-confirm-modal"
-            command="--hide"
-          >
-            Stay
-          </s-button>
-        </s-modal>
-      </s-page>
-    );
-
-  const renderSelectionView = () => (
-      <s-page heading={selectionSlotLabel(selectionSlot!)} inlineSize="large">
-        <s-stack slot="header-actions" direction="inline" gap="base">
-          {hasSelectionUnsavedChanges() ? (
-            <s-button icon="arrow-left" commandFor="selection-leave-modal">
-              Back
-            </s-button>
-          ) : (
-            <s-button icon="arrow-left" onClick={backFromSelection}>
-              Back
-            </s-button>
-          )}
-          <s-button onClick={clearSelectionDraft} disabled={selectionDraft.length === 0}>
-            Clear Selection
-          </s-button>
-          <s-button
-            onClick={loadSelectionIntoCurrent}
-            disabled={
-              isPublicSelection
-                ? checkedItemCount === 0
-                : selectionDraft.length === 0 && selectionNoteDraft.length === 0
-            }
-          >
-            Load Selection
-          </s-button>
-          <s-button
-            variant="primary"
-            disabled={selectedProductList.length === 0 && noteObjects.length === 0}
-            onClick={addMainSelectionToDraft}
-          >
-            Add to Selection
-          </s-button>
-          <s-button loading={selectionSaving} onClick={saveSelectionDraft}>
-            Save
-          </s-button>
-        </s-stack>
-
-        {selectionError ? (
-          <s-banner tone="critical" heading="Selection error">
-            <s-text>{selectionError}</s-text>
-          </s-banner>
-        ) : null}
-
-        {selectionMissing ? (
-          <s-banner tone="info" heading="Some products were skipped">
-            <s-text>Some products in this selection no longer exist and were skipped.</s-text>
-          </s-banner>
-        ) : null}
-
-        <s-section padding="none">
-          <s-box padding="base">
-            <s-stack gap="base">
-              <s-stack
-                direction="inline"
-                gap="base"
-                justifyContent="space-between"
-                alignItems="center"
-              >
-                <s-heading>Items in this selection</s-heading>
-                <s-text color="subdued">
-                  {selectionDraft.length} products · {selectionNoteDraft.length} notes
-                </s-text>
-              </s-stack>
-              {selectionSlot !== 'current' ? (
-                <s-text-field
-                  label="Subtitle"
-                  value={subtitleDraft}
-                  maxLength={SUBTITLE_MAX_LENGTH}
-                  details="Up to 16 characters. Shown under this selection in the Selections menu."
-                  onInput={(e: any) => setSubtitleDraft(e.currentTarget.value)}
-                />
-              ) : null}
-              <s-search-field
-                label="Search this selection"
-                labelAccessibilityVisibility="exclusive"
-                placeholder="Search products in this selection…"
-                value={selectionSearch}
-                onInput={(e: any) => setSelectionSearch(e.currentTarget.value)}
+            {selectionSlot !== 'current' ? (
+              <s-text-field
+                label="Subtitle"
+                value={subtitleDraft}
+                maxLength={SUBTITLE_MAX_LENGTH}
+                details="Up to 16 characters. Shown under this selection in the Selections menu."
+                onInput={(e: any) => setSubtitleDraft(e.currentTarget.value)}
               />
-              {isPublicSelection ? (
-                <s-stack direction="inline" gap="small" alignItems="center">
-                  <s-button
-                    onClick={toggleSelectAllInSelection}
-                    disabled={selectionDraft.length + selectionNoteDraft.length === 0}
-                  >
-                    {allSelectionItemsChecked ? 'Deselect All' : 'Select All'}
-                  </s-button>
-                  <s-text color="subdued">{checkedItemCount} selected</s-text>
-                </s-stack>
-              ) : null}
-            </s-stack>
-          </s-box>
+            ) : null}
+            <s-search-field
+              label="Search this selection"
+              labelAccessibilityVisibility="exclusive"
+              placeholder="Search products in this selection…"
+              value={selectionSearch}
+              onInput={(e: any) => setSelectionSearch(e.currentTarget.value)}
+            />
+            {isPublicSelection ? (
+              <s-stack direction="inline" gap="small" alignItems="center">
+                <s-button
+                  onClick={toggleSelectAllInSelection}
+                  disabled={selectionDraft.length + selectionNoteDraft.length === 0}
+                >
+                  {allSelectionItemsChecked ? 'Deselect All' : 'Select All'}
+                </s-button>
+                <s-text color="subdued">{checkedItemCount} selected</s-text>
+              </s-stack>
+            ) : null}
+          </s-stack>
+        </s-box>
 
-          {/* ONE combined table interleaving products and notes, ordered by when each was added to
+        {/* ONE combined table interleaving products and notes, ordered by when each was added to
               the selection (session 8, per explicit direction) -- replaces the old two separate
               "Products"/"Notes" tables, which always showed every product before every note
               regardless of actual add order. */}
-          <s-table loading={selectionLoading}>
-            <s-table-header-row>
-              {isPublicSelection ? <s-table-header>Use</s-table-header> : null}
-              <s-table-header listSlot="primary">Item</s-table-header>
-              <s-table-header>Handle</s-table-header>
-              <s-table-header>Qty</s-table-header>
-              <s-table-header>Note</s-table-header>
-              <s-table-header>Order</s-table-header>
-              <s-table-header>Remove</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {selectionRowsFiltered.length === 0 && !selectionLoading ? (
-                <s-table-row>
-                  <s-table-cell>
-                    <s-text color="subdued">
-                      {selectionDraft.length === 0 && selectionNoteDraft.length === 0
-                        ? 'No products or notes in this selection.'
-                        : 'No items found.'}
-                    </s-text>
-                  </s-table-cell>
-                  <s-table-cell />
-                  <s-table-cell />
-                  <s-table-cell />
-                  <s-table-cell />
-                  <s-table-cell />
-                  {isPublicSelection ? <s-table-cell /> : null}
-                </s-table-row>
-              ) : (
-                selectionRowsFiltered.map((row: SelectionRow) => {
-                  const isFirst = selectionCombinedAll[0]?.id === row.id;
-                  const isLast =
-                    selectionCombinedAll[selectionCombinedAll.length - 1]?.id === row.id;
-                  const label = row.kind === 'product' ? row.product.title : 'Note';
-                  return (
-                    <s-table-row key={row.id}>
-                      {isPublicSelection ? (
-                        <s-table-cell>
-                          <s-checkbox
-                            accessibilityLabel={`Include ${label} when loading`}
-                            checked={Boolean(
-                              row.kind === 'product'
-                                ? checkedSelectionProducts[row.id]
-                                : checkedSelectionNotes[row.id],
-                            )}
-                            onChange={(e: any) =>
-                              row.kind === 'product'
-                                ? setSelectionProductChecked(row.id, e.currentTarget.checked)
-                                : setSelectionNoteChecked(row.id, e.currentTarget.checked)
-                            }
-                          />
-                        </s-table-cell>
-                      ) : null}
+        <s-table loading={selectionLoading}>
+          <s-table-header-row>
+            {isPublicSelection ? <s-table-header>Use</s-table-header> : null}
+            <s-table-header listSlot="primary">Item</s-table-header>
+            <s-table-header>Handle</s-table-header>
+            <s-table-header>Qty</s-table-header>
+            <s-table-header>Note</s-table-header>
+            <s-table-header>Order</s-table-header>
+            <s-table-header>Remove</s-table-header>
+          </s-table-header-row>
+          <s-table-body>
+            {selectionRowsFiltered.length === 0 && !selectionLoading ? (
+              <s-table-row>
+                <s-table-cell>
+                  <s-text color="subdued">
+                    {selectionDraft.length === 0 && selectionNoteDraft.length === 0
+                      ? 'No products or notes in this selection.'
+                      : 'No items found.'}
+                  </s-text>
+                </s-table-cell>
+                <s-table-cell />
+                <s-table-cell />
+                <s-table-cell />
+                <s-table-cell />
+                <s-table-cell />
+                {isPublicSelection ? <s-table-cell /> : null}
+              </s-table-row>
+            ) : (
+              selectionRowsFiltered.map((row: SelectionRow) => {
+                const isFirst = selectionCombinedAll[0]?.id === row.id;
+                const isLast = selectionCombinedAll[selectionCombinedAll.length - 1]?.id === row.id;
+                const label = row.kind === 'product' ? row.product.title : 'Note';
+                return (
+                  <s-table-row key={row.id}>
+                    {isPublicSelection ? (
                       <s-table-cell>
-                        {row.kind === 'product' ? (
-                          <s-stack direction="inline" gap="small" alignItems="center">
-                            {row.product.imageUrl ? (
-                              <s-thumbnail size="small" src={row.product.imageUrl} alt={row.product.title} />
-                            ) : null}
-                            <s-text type="strong">{row.product.title}</s-text>
-                          </s-stack>
-                        ) : (
-                          <s-text type="strong">📝 Note</s-text>
-                        )}
-                      </s-table-cell>
-                      <s-table-cell>
-                        <s-text color="subdued">
-                          {row.kind === 'product' ? row.product.handle : '—'}
-                        </s-text>
-                      </s-table-cell>
-                      <s-table-cell>
-                        <s-text color="subdued">
-                          {row.kind === 'product' ? formatQty(row.product.totalInventory) : '—'}
-                        </s-text>
-                      </s-table-cell>
-                      <s-table-cell>
-                        <s-text-field
-                          label={row.kind === 'product' ? `Note for ${row.product.title}` : 'Note text'}
-                          labelAccessibilityVisibility="exclusive"
-                          placeholder={row.kind === 'product' ? 'Add a note…' : undefined}
-                          value={row.kind === 'product' ? row.product.note || '' : row.note.note}
-                          onInput={(e: any) =>
+                        <s-checkbox
+                          accessibilityLabel={`Include ${label} when loading`}
+                          checked={Boolean(
                             row.kind === 'product'
-                              ? setSelectionDraftNote(row.id, e.currentTarget.value)
-                              : setSelectionDraftNoteContent(row.id, e.currentTarget.value)
+                              ? checkedSelectionProducts[row.id]
+                              : checkedSelectionNotes[row.id],
+                          )}
+                          onChange={(e: any) =>
+                            row.kind === 'product'
+                              ? setSelectionProductChecked(row.id, e.currentTarget.checked)
+                              : setSelectionNoteChecked(row.id, e.currentTarget.checked)
                           }
                         />
                       </s-table-cell>
-                      <s-table-cell>
-                        {/* Reordering uses move controls because Polaris has no drag-and-drop
+                    ) : null}
+                    <s-table-cell>
+                      {row.kind === 'product' ? (
+                        <s-stack direction="inline" gap="small" alignItems="center">
+                          {row.product.imageUrl ? (
+                            <s-thumbnail
+                              size="small"
+                              src={row.product.imageUrl}
+                              alt={row.product.title}
+                            />
+                          ) : null}
+                          <s-text type="strong">{row.product.title}</s-text>
+                        </s-stack>
+                      ) : (
+                        <s-text type="strong">📝 Note</s-text>
+                      )}
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-text color="subdued">
+                        {row.kind === 'product' ? row.product.handle : '—'}
+                      </s-text>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-text color="subdued">
+                        {row.kind === 'product' ? formatQty(row.product.totalInventory) : '—'}
+                      </s-text>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-text-field
+                        label={
+                          row.kind === 'product' ? `Note for ${row.product.title}` : 'Note text'
+                        }
+                        labelAccessibilityVisibility="exclusive"
+                        placeholder={row.kind === 'product' ? 'Add a note…' : undefined}
+                        value={row.kind === 'product' ? row.product.note || '' : row.note.note}
+                        onInput={(e: any) =>
+                          row.kind === 'product'
+                            ? setSelectionDraftNote(row.id, e.currentTarget.value)
+                            : setSelectionDraftNoteContent(row.id, e.currentTarget.value)
+                        }
+                      />
+                    </s-table-cell>
+                    <s-table-cell>
+                      {/* Reordering uses move controls because Polaris has no drag-and-drop
                             component and the sandbox exposes no HTML5 drag events. Moves are
                             disabled while a search filters the list, so positions always reflect
                             true combined order. */}
-                        <s-stack direction="inline" gap="small-400" alignItems="center">
-                          <s-button
-                            icon="chevron-up"
-                            variant="tertiary"
-                            accessibilityLabel={`Move ${label} up`}
-                            disabled={selectionSearch.trim() !== '' || isFirst}
-                            onClick={() => moveSelectionRow(row.id, -1)}
-                          />
-                          <s-button
-                            icon="chevron-down"
-                            variant="tertiary"
-                            accessibilityLabel={`Move ${label} down`}
-                            disabled={selectionSearch.trim() !== '' || isLast}
-                            onClick={() => moveSelectionRow(row.id, 1)}
-                          />
-                        </s-stack>
-                      </s-table-cell>
-                      <s-table-cell>
+                      <s-stack direction="inline" gap="small-400" alignItems="center">
                         <s-button
-                          icon="x"
+                          icon="chevron-up"
                           variant="tertiary"
-                          accessibilityLabel={`Remove ${label}`}
-                          onClick={() =>
-                            row.kind === 'product'
-                              ? removeFromSelectionDraft(row.id)
-                              : removeNoteFromDraft(row.id)
-                          }
+                          accessibilityLabel={`Move ${label} up`}
+                          disabled={selectionSearch.trim() !== '' || isFirst}
+                          onClick={() => moveSelectionRow(row.id, -1)}
                         />
-                      </s-table-cell>
-                    </s-table-row>
-                  );
-                })
-              )}
-            </s-table-body>
-          </s-table>
-        </s-section>
+                        <s-button
+                          icon="chevron-down"
+                          variant="tertiary"
+                          accessibilityLabel={`Move ${label} down`}
+                          disabled={selectionSearch.trim() !== '' || isLast}
+                          onClick={() => moveSelectionRow(row.id, 1)}
+                        />
+                      </s-stack>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-button
+                        icon="x"
+                        variant="tertiary"
+                        accessibilityLabel={`Remove ${label}`}
+                        onClick={() =>
+                          row.kind === 'product'
+                            ? removeFromSelectionDraft(row.id)
+                            : removeNoteFromDraft(row.id)
+                        }
+                      />
+                    </s-table-cell>
+                  </s-table-row>
+                );
+              })
+            )}
+          </s-table-body>
+        </s-table>
+      </s-section>
 
-        <s-modal id="selection-leave-modal" heading="Unsaved changes">
-          <s-text>You have unsaved changes. Leave without saving?</s-text>
-          <s-button
-            slot="primary-action"
-            variant="primary"
-            tone="critical"
-            commandFor="selection-leave-modal"
-            command="--hide"
-            onClick={backFromSelection}
-          >
-            Leave without saving
-          </s-button>
-          <s-button
-            slot="secondary-actions"
-            variant="secondary"
-            commandFor="selection-leave-modal"
-            command="--hide"
-          >
-            Stay
-          </s-button>
-        </s-modal>
-      </s-page>
-    );
+      <s-modal id="selection-leave-modal" heading="Unsaved changes">
+        <s-text>You have unsaved changes. Leave without saving?</s-text>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          tone="critical"
+          commandFor="selection-leave-modal"
+          command="--hide"
+          onClick={backFromSelection}
+        >
+          Leave without saving
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          variant="secondary"
+          commandFor="selection-leave-modal"
+          command="--hide"
+        >
+          Stay
+        </s-button>
+      </s-modal>
+    </s-page>
+  );
 
   const renderMainView = () => (
     <s-page heading="Template to File" inlineSize="large">
@@ -7067,7 +7215,7 @@ function Extension() {
                               {p.allVariants.map((v: VariantData) => (
                                 <s-checkbox
                                   key={v.id}
-                                  accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
+                                  label={v.title}
                                   checked={checkedVariantIds.includes(v.id)}
                                   onChange={(e: any) =>
                                     toggleVariantChecked(
@@ -7077,9 +7225,7 @@ function Extension() {
                                       e.currentTarget.checked,
                                     )
                                   }
-                                >
-                                  {v.title}
-                                </s-checkbox>
+                                />
                               ))}
                             </s-stack>
                           ) : null}
@@ -7349,4 +7495,3 @@ function Extension() {
 }
 
 export default (): void => render(<Extension />, document.body);
-
