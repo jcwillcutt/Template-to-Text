@@ -201,7 +201,8 @@ one iteration) -- almost always used inside an {{ #if=... }} check.
 9. TEXT TOOLS
 --------------
 Length -- character count of the inner content:
-  {{ #length }}{{ product.title }}{{/length}}   -->  8   (for "Blue Mug")
+  {{ #length }}{{ product.title }}{{/length}}   
+  -->  8   (for "Blue Mug")
 
 Chop -- keep everything up to where a condition first becomes true:
   {{ #chop={{ {{j}}==3 }}, direction=L, j=0 }}{{ product.title }}{{/chop}}
@@ -219,11 +220,18 @@ Insert -- splice text into the surrounding output at a character position:
   {{ #insert=0, drop=FALSE }}>> {{/insert}}Blue Mug
   -->  >> Blue Mug
 
-Wrap -- break long text into fixed-width lines:
-  {{#wrap=20, min_wraps=0, max_wraps=0, hard=FALSE, delineator={{ /return }}}}
-  {{ product.description }}
-  {{/wrap}}
+Replace -- replace substrings from the inner content with a replacement:
+  {{ #replace=$, replacement=&dollar; }}Was ${{ product.price }} now ${{ product.compareAtPrice }}!{{/replace}}
+  --> Was &dollar;10.00 now &dollar;8.00!
+  {{ #replace=aba, replacement=y }}ababab{{/replace}}
+  --> ybab
 
+Wrap -- break long text into fixed-width lines:
+  {{#wrap=10, min_wraps=0, max_wraps=0, hard=FALSE, delineator={{ /return }}}}{{ product.description }}{{/wrap}}
+  --> The Best New
+      Product
+  {{#wrap=10, min_wraps=0, max_wraps=0, hard=FALSE, delineator={{ /return }}}}{{ product.description }}{{/wrap}}
+  --> The Best New
 
 10. COMMENTS
 -------------
