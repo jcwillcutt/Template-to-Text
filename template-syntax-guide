@@ -226,12 +226,14 @@ Replace -- replace substrings from the inner content with a replacement:
   {{ #replace=aba, replacement=y }}ababab{{/replace}}
   --> ybab
 
-Wrap -- break long text into fixed-width lines:
+Wrap -- break long text into fixed-width lines (0 min_wraps or max_wraps evaluates the same as ommited- to no limit):
   {{#wrap=10, min_wraps=0, max_wraps=0, hard=FALSE, delineator={{ /return }}}}{{ product.description }}{{/wrap}}
   --> The Best New
       Product
-  {{#wrap=10, min_wraps=0, max_wraps=0, hard=FALSE, delineator={{ /return }}}}{{ product.description }}{{/wrap}}
-  --> The Best New
+  {{#wrap=10, min_wraps=2, max_wraps=0, hard=FALSE, delineator= / }}{{ product.description }}{{/wrap}}
+  --> The Best New /Product /
+  {{#wrap=3, max_wraps=0, hard=TRUE, delineator=, }}{{ product.description }}{{/wrap}}
+  --> The, Be,st ,New, Pr,odu,ct 
 
 10. COMMENTS
 -------------
