@@ -103,8 +103,9 @@ inside a wrap block's delineator (see section 12).
 ----------------------
 Any word can be a variable. Seven short names (i, j, k, l, x, y, z) are offered as
 shortcuts, but any name works as long as it isn't one of the reserved words used by
-the tags below (if, while, wrap, repeat, chop, index, insert, comment, length, time,
-tag, break, skip, and a few tag-parameter names like direction/delineator/drop).
+the tags below (if, while, wrap, repeat, replace, chop, index, insert, comment, length,
+time, tag, break, skip, and a few tag-parameter names like direction/delineator/drop/
+replacement).
 
 Assign:      {{ x = 5 }}          (writes nothing to the output)
 Read:        {{ x }}              (outputs the current value)
@@ -118,6 +119,23 @@ Example:
   {{ x = {{ ={{x}}*2 }} }}
   Total: {{ x }}
   -->  Total: 6
+
+A variable's value can also be a whole text-tool block (Replace, Chop, an If block, ...), which
+lets you "clean up" a string in one place at the top of your template and reuse the cleaned
+version everywhere else. Reassigning the SAME variable from its own current value chains multiple
+tools together:
+  {{ title = {{ #replace=&, replacement=and }}{{ product.title }}{{/replace}} }}
+  {{ title = {{ #replace=/, replacement=- }}{{ title }}{{/replace}} }}
+  ... use {{ title }} anywhere below, with both replacements already applied ...
+
+Want a variable name that's GUARANTEED never to clash with a reserved word (now or in any future
+update)? Start it with $:
+  {{ $title = 5 }}     Assign
+  {{ $title }}         Read
+A name starting with $ is never checked against the reserved-word list at all -- it can't collide
+with "length", "time", or any word a future tool might reserve. This is entirely optional: bare
+names ({{ x }}) work exactly as before and always will. Use "Assign variable ($, collision-safe)"
+in the editor's Insert menu to insert one.
 
 
 6. BOOLEAN CONDITIONS
@@ -140,6 +158,10 @@ non-zero, and not literally FALSE or 0).
   ...shown when FALSE...
 {{ /if }}
 
+  -if (bool expr, required): tested once; TRUE shows the first branch, FALSE shows {{ #else }}'s
+   branch (or nothing, if there is no {{ #else }})
+  !if: a malformed or empty condition counts as FALSE
+
 Example:
   {{ #if={{ product.totalInventory }} > 0 }}
   In stock
@@ -153,40 +175,62 @@ Example:
 8. LOOPS
 ---------
 
-8a. Variant loop -- steps through one product's variants
+8a. Variant loop -- steps through the current product's in-scope variants:
+  -l (var name = start int, optional): which variable holds the step counter, and its
+   starting value. Default: l=0
+  !l: a product with no variants renders the inner content zero times
+  -LABEL (word right after ".foreach", optional): purely cosmetic, not bound to anything --
+   the loop item is always read via {{ variant.* }} no matter what LABEL you use, or omit it
+  Ex:
   {{ #variants.foreach v, l=0 }}
   {{ variant.title }}: {{ variant.price }}
   {{/variants.foreach}}
 
-8b. Tags loop -- steps through one product's tags
+8b. Tags loop -- steps through the current product's tags:
+  -i (var name = start int, optional): which variable holds the step counter, and its
+   starting value. Default: i=0
+  !i: a product with no tags renders the inner content zero times
+  -LABEL (word right after ".foreach", optional): purely cosmetic, same as the variant loop's
+  Ex:
   {{ #tags.foreach tag, i=0 }}
   #{{ tag }}
   {{/tags.foreach}}
 
 8c. Selection loops -- step through your whole selection (used with File Break set to
-    "Selection", see section 12). One tag, with an optional word after it choosing what
-    to iterate:
-  {{ #selection.foreach product, i=0 }}   products only (the default)
-  {{ #selection.foreach note, i=0 }}      notes only
-  {{ #selection.foreach object, i=0 }}    products, then notes
-
-  Example:
+    "Selection", see section 12).
+  -selection.foreach (product / note / object, optional word right after the tag): what to
+   iterate. Default (or "product"/"products"): products only. "note"/"notes": notes only.
+   "object"/"objects": products, then notes
+  -i (var name = start int, optional): which variable holds the step counter, and its
+   starting value. Default: i=0
+  -skip_first (bool, optional): TRUE skips rendering the first iteration's content (still
+   counts it toward the counter). Default: FALSE
+  -skip_last (bool, optional): TRUE skips rendering the last iteration's content. Default: FALSE
+  Ex:
     {{ #selection.foreach product, i=0 }}
     {{ i }}. {{ product.title }} -- {{ product.handle }}
     {{/selection.foreach}}
     -->  0. Blue Mug -- blue-mug
          1. Red Mug -- red-mug
 
-  Options (added after the counter, comma-separated): skip_first=TRUE, skip_last=TRUE
-
-8d. Metafields loop -- steps through one product's metafields
+8d. Metafields loop -- steps through the current product's metafields:
+  -i (var name = start int, optional): which variable holds the step counter, and its
+   starting value. Default: i=0
+  !i: a product with no metafields renders the inner content zero times
+  -LABEL (word right after ".foreach", optional): purely cosmetic, same as the variant loop's
+  Ex:
   {{ #metafields.foreach mf, i=0 }}
   {{ mf.namespace }}.{{ mf.key }}: {{ mf.value }}
   {{/metafields.foreach}}
   -->  custom.material: Ceramic
        custom.color: Blue
 
-8e. While loop -- repeats while a condition is true; you control your own counter
+8e. While loop -- repeats while a condition is true; you control your own counter:
+  -while (bool expr, required): re-tested before every step; the loop stops the first time
+   this is FALSE
+  !while: runs up to a hard safety cap of 10,000 steps even if the condition never becomes
+   FALSE, so a mistyped condition can't hang a render forever
+  Ex:
   {{ x = 1 }}
   {{ #while={{x}}<5 }}
   {{ x }},
@@ -200,40 +244,92 @@ one iteration) -- almost always used inside an {{ #if=... }} check.
 
 9. TEXT TOOLS
 --------------
-Length -- character count of the inner content:
-  {{ #length }}{{ product.title }}{{/length}}   
+Below, each argument is listed as -argument (type): what it means, followed by a ! line
+noting what happens if it's left out or given something invalid. Args with no default shown
+are required; everything else is optional.
+
+Length -- character count of the (fully rendered) inner content:
+  No arguments.
+  Ex:
+  {{ #length }}{{ product.title }}{{/length}}
   -->  8   (for "Blue Mug")
 
-Chop -- keep everything up to where a condition first becomes true:
+Chop -- keep everything up to where a condition first becomes true, walking one
+character at a time:
+  -chop (bool expr, required): tested at each step, with the step counter (j by default)
+   bound to the current position
+  !chop: if the condition never becomes true, the whole (unchopped) content is returned; a
+   malformed condition counts as FALSE at every step
+  -direction (L or R): L (default) walks left-to-right, keeping the FRONT of the text; R
+   walks right-to-left, keeping the BACK
+  -j (var name = start int): which variable holds the step counter, and its starting value.
+   Default: j=0
+  Ex:
   {{ #chop={{ {{j}}==3 }}, direction=L, j=0 }}{{ product.title }}{{/chop}}
   -->  "Blu"  (first 3 characters; direction=R walks from the right instead)
 
 Repeat -- output the inner content N times:
+  -repeat (positive int, required): number of times to repeat the inner content
+  !repeat: a missing, non-integer, or less-than-1 count renders nothing; a count of exactly
+   1 renders the content once, unchanged
+  -delineator (str): string inserted between repeated copies. Default: none
+  Ex:
   {{ #repeat=3, delineator=; }}{{ product.sku }}{{/repeat}}
   -->  SKU1;SKU1;SKU1
 
-Index -- one character of the inner content, by position (0-based, negative counts
-from the end):
-  {{ #index=-1 }}{{ product.title }}{{/index}}   -->  "g"  (last letter of "Blue Mug")
-
-Insert -- splice text into the surrounding output at a character position:
-  {{ #insert=0, drop=FALSE }}>> {{/insert}}Blue Mug
-  -->  >> Blue Mug
-
-Replace -- replace substrings from the inner content with a replacement:
+Replace -- substitute every occurrence of a substring in the inner content with another:
+  -replace (str, required): the exact text to find (a literal substring match, never a
+   pattern/regex)
+  !replace: an empty or missing SEARCH is a no-op -- the inner content is returned unchanged
+  -replacement (str): the text to put in its place. Default: none (deletes SEARCH)
+  Ex:
   {{ #replace=$, replacement=&dollar; }}Was ${{ product.price }} now ${{ product.compareAtPrice }}!{{/replace}}
   --> Was &dollar;10.00 now &dollar;8.00!
   {{ #replace=aba, replacement=y }}ababab{{/replace}}
   --> ybab
 
-Wrap -- break long text into fixed-width lines (0 min_wraps or max_wraps evaluates the same as ommited- to no limit):
+Index -- one character of the inner content, by position:
+  -index (int, required): 0-based position; negative counts back from the end (-1 is the
+   last character)
+  !index: a missing, non-numeric, or out-of-range position renders nothing
+  Ex:
+  {{ #index=-1 }}{{ product.title }}{{/index}}
+  -->  "g"  (last letter of "Blue Mug")
+
+Insert -- splice the inner content into the SURROUNDING output at a character position:
+  -insert (int, required): the splice point. N >= 0 counts characters INTO the text that
+   follows this block; N < 0 counts characters back from the end of the text that precedes it
+  !insert: a missing or non-integer position leaves the surrounding text unchanged and
+   discards the inner content
+  -drop (bool): what happens when N falls outside the surrounding text's range. FALSE
+   (default) clamps to the nearest end and still inserts the content; TRUE discards the
+   inner content instead
+  Ex:
+  {{ #insert=0, drop=FALSE }}>> {{/insert}}Blue Mug
+  -->  >> Blue Mug
+
+Wrap -- break long text into fixed-width lines:
+  -wrap (positive int, required): max characters per line (the first, unnamed argument)
+  !wrap: a missing, non-integer, or non-positive value leaves the inner content completely
+   unwrapped
+  -min_wraps (int): pad with extra empty lines until at least this many lines exist. 0 or
+   omitted = no minimum
+  -max_wraps (int): stop wrapping after this many lines -- any remaining text is appended,
+   unwrapped, onto the last line. 0 or omitted = no maximum
+  -hard (bool): FALSE (default) breaks only at word boundaries (a word longer than the line
+   width overflows it); TRUE breaks at the exact character width, mid-word if needed
+  -delineator (str): string inserted between lines. Default: none -- use {{ /return }} for a
+   real line break
+  Ex:
   {{#wrap=10, min_wraps=0, max_wraps=0, hard=FALSE, delineator={{ /return }}}}{{ product.description }}{{/wrap}}
   --> The Best New
       Product
-  {{#wrap=10, min_wraps=2, max_wraps=0, hard=FALSE, delineator= / }}{{ product.description }}{{/wrap}}
-  --> The Best New /Product /
+  {{#wrap=10, min_wraps=4, max_wraps=0, hard=FALSE, delineator= / }}{{ product.description }}{{/wrap}}
+  --> The Best /New /Product//
+  {{#wrap=10, min_wraps=0, max_wraps=1, hard=FALSE, delineator= / }}{{ product.description }}{{/wrap}}
+  --> The Best /New Product
   {{#wrap=3, max_wraps=0, hard=TRUE, delineator=, }}{{ product.description }}{{/wrap}}
-  --> The, Be,st ,New, Pr,odu,ct 
+  --> The, Be,st ,New, Pr,odu,ct
 
 10. COMMENTS
 -------------
@@ -294,6 +390,7 @@ QUICK REFERENCE
 {{ time=MM/dd/yyyy }}  {{ time=h:mm tt }}  {{ time=dddd, MMMM d, yyyy }}
 {{ primaryDomain }}                     {{ /return }} {{ /space }}
 {{ x = VALUE }}  {{ x }}                {{ = EXPR }}
+{{ $x = VALUE }}  {{ $x }}              (collision-safe variable form)
 {{ #if=COND }} ... {{ #else }} ... {{ /if }}
 {{ #variants.foreach v, l=0 }} ... {{/variants.foreach}}
 {{ #tags.foreach tag, i=0 }} ... {{/tags.foreach}}
@@ -303,6 +400,7 @@ QUICK REFERENCE
 {{ #length }}TEXT{{/length}}
 {{ #chop=COND, direction=L, j=0 }} ... {{/chop}}
 {{ #repeat=N, delineator=X }} ... {{/repeat}}
+{{ #replace=SEARCH, replacement=REPLACEMENT }} ... {{/replace}}
 {{ #index=N }} ... {{/index}}
 {{ #insert=N, drop=FALSE }} ... {{/insert}}
 {{ #wrap=N, min_wraps=0, max_wraps=0, hard=FALSE, delineator=X}} ... {{/wrap}}
