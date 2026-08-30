@@ -3155,6 +3155,59 @@ function renderPlainTokens(
   return renderTemplateText(text, product, allProducts, ctx, false);
 }
 
+// BUG FIXED (session 14): findNextRenderBlock's per-kind finders (findChopBlock/findRepeatBlock/
+// findReplaceBlock/...) each locate their tag's OPEN pattern with a plain forward regex search --
+// they have NO awareness of whether that match sits inside an outer, not-yet-processed `{{ ... }}`
+// token that starts earlier (an assignment `{{ name = ... }}` is the common case, since ASSIGNMENT
+// is not itself one of findNextRenderBlock's recognized kinds and so can never "win" the
+// earliest-candidate race the way an outer chop/repeat/etc. wrapping an inner one already does).
+// Reported directly: the syntax guide's own chained-Replace-in-a-variable example ("clean a string
+// with multiple replacements") still failed after session 13's assignment-value fix -- because that
+// fix (renderTokenContent's assignment branch calling renderTokens instead of renderTemplateText)
+// can only run once the FULL `{{ name = VALUE }}` token has been correctly isolated as one balanced
+// unit, and it never was: renderTokens' own dispatch loop below found the NESTED `{{ #replace=... }}`
+// first and sliced `{{ name = ` off as if it were complete, ordinary plain text -- which
+// renderPlainTokens then can't parse as a token at all (its own `{{` has no matching `}}` within that
+// slice), so it fell through to being echoed character-for-character, exactly reproducing the
+// reported garbled output. Verified via real JS BEFORE this fix, using a faithful transcription of
+// this exact function, that this reproduces the reported symptom byte-for-byte (see
+// nested_block_in_assignment_bug.js, scratchpad) -- not guessed at.
+//
+// Fix: enclosingTokenEnd (below) checks whether the text between `cursor` and a candidate's
+// `blockStart` is brace-BALANCED. When it isn't (the candidate is nested inside a still-open outer
+// token), the WHOLE outer token is rendered as one plain span via renderPlainTokens first -- which,
+// for an assignment, recurses into renderTokens on just the isolated VALUE text (session 13's fix),
+// where the nested block is now genuinely at the top of ITS OWN scan and is found and run correctly.
+// A brace-balanced prefix (the overwhelming common case -- no assignment or other non-block wrapper
+// involved) makes this a no-op, so nothing changes for any template that doesn't hit this pattern.
+// applyIfBlocks (called just below) does NOT need the equivalent fix: an if-block nested the same way
+// self-corrects, because applyIfBlocks substitutes the if-tags with their chosen branch's content
+// (adding no braces of its own) BEFORE the dispatch loop below ever runs, which restores the outer
+// token's balance for the plain-token scanner to pick up correctly on its own -- verified via real JS
+// that this case was never actually broken (see nested_if_in_assignment_verify.js, scratchpad).
+function enclosingTokenEnd(text: string, fromIndex: number, blockStart: number): number | null {
+  let depth = 0;
+  let outerOpen = -1;
+  let i = fromIndex;
+  while (i < blockStart) {
+    if (text[i] === '{' && text[i + 1] === '{') {
+      if (depth === 0) outerOpen = i;
+      depth += 1;
+      i += 2;
+      continue;
+    }
+    if (text[i] === '}' && text[i + 1] === '}') {
+      if (depth > 0) depth -= 1;
+      i += 2;
+      continue;
+    }
+    i += 1;
+  }
+  if (depth <= 0 || outerOpen === -1) return null;
+  const close = findMatchingClose(text, outerOpen);
+  return close !== -1 && close > fromIndex ? close : null;
+}
+
 // Run the full per-product/iteration substitution pipeline for a single product with a given
 // evaluation context: if blocks first, then chop blocks (whose inner content is rendered recursively
 // through this same pipeline before being chopped), then length tokens, math equations, and plain
@@ -3175,6 +3228,15 @@ function renderTokens(
     if (!match) {
       result += renderPlainTokens(withIf.slice(cursor), product, allProducts, ctx);
       break;
+    }
+    // See enclosingTokenEnd's comment above: a candidate nested inside a still-open outer token
+    // (e.g. an assignment's value) is not dispatched directly -- the whole outer token is rendered
+    // as one plain span first, so the assignment path gets a chance to recurse into this block.
+    const enclosing = enclosingTokenEnd(withIf, cursor, match.blockStart);
+    if (enclosing !== null) {
+      result += renderPlainTokens(withIf.slice(cursor, enclosing), product, allProducts, ctx);
+      cursor = enclosing;
+      continue;
     }
     result += renderPlainTokens(withIf.slice(cursor, match.blockStart), product, allProducts, ctx);
     if (match.kind === 'chop') {
