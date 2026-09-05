@@ -737,6 +737,19 @@ function formatQty(totalInventory: number | null): string {
   return totalInventory == null ? '—' : String(totalInventory);
 }
 
+// Builds a link to a product's Shopify Admin edit page from its GraphQL gid
+// ("gid://shopify/Product/123...") and the shop's primary domain host (the same value exposed as
+// {{ primaryDomain }}), for the product-selection table's "click the title to open the product
+// page in a new tab" link. Returns null when either piece isn't available yet (primaryDomain
+// hasn't loaded, or the id isn't in the expected gid shape) so the caller can fall back to plain,
+// unlinked text instead of rendering a broken link.
+function adminProductUrl(productId: string, primaryDomain: string): string | null {
+  if (!primaryDomain) return null;
+  const match = /\/Product\/(\d+)$/.exec(productId);
+  if (!match) return null;
+  return `https://${primaryDomain}/admin/products/${match[1]}`;
+}
+
 function slugify(input: string): string {
   const s = input
     .toLowerCase()
@@ -6056,6 +6069,17 @@ function Extension() {
     }
   };
 
+  // Refresh button on the selection editor page: re-reads this same slot the same way opening it
+  // fresh from the Selections menu would (live app state for "current," a re-fetch from the
+  // stored metafield for a public slot) -- so it also discards any not-yet-saved edits in the
+  // draft, same as reloading any other page would. selectionLoading (already set by
+  // openSelectionView for public slots) doubles as this button's own loading/disabled state.
+  const refreshSelectionView = (): void => {
+    if (selectionSlot) {
+      openSelectionView(selectionSlot);
+    }
+  };
+
   const selectionDraftSignature = useMemo(
     () => selectionSignature(selectionDraft, selectionNoteDraft),
     [selectionDraft, selectionNoteDraft],
@@ -6305,8 +6329,12 @@ function Extension() {
 
   // Persist the draft. A saved slot writes its product ids to its shop metafield; "Current Selection"
   // simply applies the draft to the in-memory product selection (nothing is persisted).
-  const saveSelectionDraft = async (): Promise<void> => {
-    if (!selectionSlot) return;
+  // Returns whether the save actually succeeded (used by the "Unsaved changes" popup's Save
+  // Changes button to decide whether it's safe to navigate away afterward -- see
+  // saveSelectionDraftAndLeave below). The plain Save button in the selection view's header
+  // discards this return value, same as before.
+  const saveSelectionDraft = async (): Promise<boolean> => {
+    if (!selectionSlot) return false;
     setSelectionError(null);
     if (selectionSlot === 'current') {
       const next: Record<string, ProductData> = {};
@@ -6328,18 +6356,18 @@ function Extension() {
       // Selection order in full, replacing whatever it was before.
       setCurrentSelectionOrderIndex(selectionViewOrderIndex);
       setSelectionBaseline(selectionSignature(selectionDraft, selectionNoteDraft));
-      return;
+      return true;
     }
     const key = selectionMetafieldKey(selectionSlot);
     if (!key) {
       setSelectionError('This selection could not be saved.');
-      return;
+      return false;
     }
     setSelectionSaving(true);
     try {
       const ownerId = await ensureShopId(setSelectionError);
       if (!ownerId) {
-        return;
+        return false;
       }
       const entries: SelectionEntry[] = selectionDraft.map((p) => ({
         id: p.id,
@@ -6390,7 +6418,7 @@ function Extension() {
       const message = formatGraphQLErrors(errors, data?.metafieldsSet?.userErrors);
       if (message) {
         setSelectionError(message);
-        return;
+        return false;
       }
       setSelectionEntries((prev) => ({ ...prev, [selectionSlot]: entries }));
       setSelectionNotes((prev) => ({ ...prev, [selectionSlot]: selectionNoteDraft }));
@@ -6410,8 +6438,10 @@ function Extension() {
       setSubtitleBaseline(trimmedSubtitle);
       setSelectionBaseline(selectionSignature(selectionDraft, selectionNoteDraft));
       setSelectionMissing(false);
+      return true;
     } catch (err: any) {
       setSelectionError(err?.message || 'Failed to save this selection.');
+      return false;
     } finally {
       setSelectionSaving(false);
     }
@@ -6421,6 +6451,17 @@ function Extension() {
     setView('main');
     setSelectionSlot(null);
     setSelectionError(null);
+  };
+
+  // Used by the "Unsaved changes" popup's Save Changes button: save the draft, then leave the
+  // selection view, but ONLY on success -- a failed save leaves selectionError set and the
+  // merchant on the selection view (with the popup already dismissed by its command="--hide"),
+  // exactly like clicking the ordinary Save button and seeing the same error inline would.
+  const saveSelectionDraftAndLeave = async (): Promise<void> => {
+    const saved = await saveSelectionDraft();
+    if (saved) {
+      backFromSelection();
+    }
   };
 
   // The open selection's products and notes, combined into ONE ordered list (session 8, per
@@ -6648,7 +6689,7 @@ function Extension() {
             <s-text-field
               label="Merge IF:"
               value={editorMergeCondition}
-              details="A TRUE/FALSE condition (same grammar as an If block). TRUE merges the next object's output into the current file instead of starting a new one -- leave blank to never merge. Reference the current, next, and previous objects with {{ selection.curr/next/prev.product/variant.FIELD }} and {{ selection.curr/next/prev.type }} (empty when there is no next/previous object)."
+              details="Can be used to modify the file break behavior.  If evaluates to TRUE, the next file's text will be appended to the current file's text. If Empty or FALSE, the files do not merge. Can use variables, functions, and other objects in the selection using commands and selection.curr/next/prev.product/variant.FIELD to reference neighboring objects."
               onInput={(e: any) => setEditorMergeCondition(e.currentTarget.value)}
             />
 
@@ -6734,17 +6775,36 @@ function Extension() {
           </s-button>
         </s-modal>
 
+        {/* All three actions live in the "secondary-actions" slot, in this exact order, rather
+            than splitting the red button off into "primary-action": that slot only accepts
+            variant "secondary"/"auto" (see the note-modal below), so a "primary" button
+            couldn't sit alongside them there, and s-modal doesn't document primary-action's
+            position relative to secondary-actions closely enough to guarantee "red, green,
+            gray" left-to-right if the two slots were mixed. Named-slot children render in the
+            order they're declared, so keeping all three together is what actually guarantees
+            the requested order. There is no green tone available on s-button (only
+            critical/auto/neutral) -- "Save Changes" uses variant="auto" as the closest
+            supported emphasis short of red/gray. */}
         <s-modal id="leave-confirm-modal" heading="Unsaved changes">
           <s-text>You have unsaved changes. Leave without saving?</s-text>
           <s-button
-            slot="primary-action"
-            variant="primary"
+            slot="secondary-actions"
+            variant="secondary"
             tone="critical"
             commandFor="leave-confirm-modal"
             command="--hide"
             onClick={confirmLeave}
           >
             Leave without saving
+          </s-button>
+          <s-button
+            slot="secondary-actions"
+            variant="auto"
+            commandFor="leave-confirm-modal"
+            command="--hide"
+            onClick={saveTemplate}
+          >
+            Save Changes
           </s-button>
           <s-button
             slot="secondary-actions"
@@ -6770,6 +6830,14 @@ function Extension() {
               Back
             </s-button>
           )}
+          <s-button
+            icon="refresh"
+            loading={selectionLoading}
+            disabled={selectionLoading}
+            onClick={refreshSelectionView}
+          >
+            Refresh
+          </s-button>
           <s-button onClick={clearSelectionDraft} disabled={selectionDraft.length === 0}>
             Clear Selection
           </s-button>
@@ -6781,7 +6849,7 @@ function Extension() {
                 : selectionDraft.length === 0 && selectionNoteDraft.length === 0
             }
           >
-            Load Selection
+            Load Selected
           </s-button>
           <s-button
             variant="primary"
@@ -6984,17 +7052,29 @@ function Extension() {
           </s-table>
         </s-section>
 
+        {/* See the leave-confirm-modal comment (editor view) for why all three actions share the
+            "secondary-actions" slot instead of splitting the red button into "primary-action". */}
         <s-modal id="selection-leave-modal" heading="Unsaved changes">
           <s-text>You have unsaved changes. Leave without saving?</s-text>
           <s-button
-            slot="primary-action"
-            variant="primary"
+            slot="secondary-actions"
+            variant="secondary"
             tone="critical"
             commandFor="selection-leave-modal"
             command="--hide"
             onClick={backFromSelection}
           >
             Leave without saving
+          </s-button>
+          <s-button
+            slot="secondary-actions"
+            variant="auto"
+            loading={selectionSaving}
+            commandFor="selection-leave-modal"
+            command="--hide"
+            onClick={saveSelectionDraftAndLeave}
+          >
+            Save Changes
           </s-button>
           <s-button
             slot="secondary-actions"
@@ -7224,7 +7304,13 @@ function Extension() {
                             {p.imageUrl ? (
                               <s-thumbnail size="small" src={p.imageUrl} alt={p.title} />
                             ) : null}
-                            <s-text type="strong">{p.title}</s-text>
+                            {adminProductUrl(p.id, primaryDomain) ? (
+                              <s-link href={adminProductUrl(p.id, primaryDomain)!} target="_blank">
+                                <s-text type="strong">{p.title}</s-text>
+                              </s-link>
+                            ) : (
+                              <s-text type="strong">{p.title}</s-text>
+                            )}
                           </s-stack>
                           {selectedProducts[p.id] ? (
                             <s-text-field
@@ -7255,7 +7341,7 @@ function Extension() {
                                     )
                                   }
                                 >
-                                  {v.title}
+                                  {v.title} · Qty: {formatQty(v.inventoryQuantity)}
                                 </s-checkbox>
                               ))}
                             </s-stack>
