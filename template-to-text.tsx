@@ -296,6 +296,132 @@ function isStandaloneNote(entry: SelectionEntry): boolean {
   return !entry.id.startsWith('gid://');
 }
 
+// --- History (session 17) -------------------------------------------------------------------
+// An automatic, shop-wide log of activity: which objects a template has actually produced a
+// downloaded file from, and a handful of selection/template lifecycle events. Stored the same way
+// as a public selection (one JSON array of SelectionEntry -- see that interface's own comment for
+// why a product reference and a free-standing note already share one shape), reusing the same
+// parser (parseSelectionItems) and combined-row renderer (combineSelectionRows/SelectionRow) the
+// Selection view already has. Unlike a public selection, History is written by the app itself, not
+// curated by a merchant: there is no subtitle, no manual reordering, and no manual
+// removal/editing -- see renderSettingsView's History panel. Two kinds of entries:
+//  - OBJECT entries (id = a real product gid, or an existing note's own generated id): updated IN
+//    PLACE on every reappearance -- a new occurrence never creates a duplicate entry, it appends
+//    another `{{ ... }}` tag onto the SAME entry's note (capHistoryTags below bounds how many).
+//  - Free-standing LOG entries (id = a freshly generated placeholder, via generateNoteId, exactly
+//    like a manually-typed note): one brand-new entry per occurrence -- resubtitled/cleared/
+//    template-created/template-destroyed have no natural "same object" to update in place.
+// Growth policy (deliberately asked about and confirmed with the user before building this,
+// precisely because there is no manual removal to fall back on): a hard byte-size ceiling
+// (HISTORY_SAFE_BYTES, mirroring the safety margin already used for a template shard's real
+// 131,072-byte metafield-value limit) enforced by FIFO EVICTION -- oldest entries (front of the
+// array; entries are only ever appended at the end, in true occurrence order) are dropped first
+// once the ceiling is hit, so new activity always has room and nothing silently stops being logged.
+// A per-entry tag cap (HISTORY_MAX_TAGS_PER_ENTRY) additionally bounds how long any ONE object's
+// accumulated note can grow, so a single frequently-reused product can't alone crowd out History's
+// budget for everything else -- oldest tags on that one entry drop first, same FIFO principle at a
+// smaller scale.
+const HISTORY_KEY = 'history_log';
+// Leaves the same safety margin below the real 131,072-byte metafield value limit that a template
+// shard's own SHARD_BYTE_LIMIT already uses (see packTemplatesIntoShards) -- proven headroom for
+// JSON-encoding overhead/escaping, not a new number invented for this feature.
+const HISTORY_SAFE_BYTES = 122880;
+// Secondary, count-based safety net (evaluated after the byte cap, so it only ever matters if
+// entries are unusually small) -- keeps History from growing to an unwieldy list length even on a
+// shop whose entries happen to stay well under the byte ceiling.
+const HISTORY_MAX_ENTRIES = 4000;
+// Oldest-tag-first cap on how many `{{ ... }}` tags accumulate on a single OBJECT entry's note.
+const HISTORY_MAX_TAGS_PER_ENTRY = 20;
+
+// Matches one appended `{{ ... }}` tag in a History entry's note (never spans a `{`/`}`, matching
+// every tag this feature ever generates -- none nest braces). Used only to COUNT/TRIM tags already
+// appended by this feature, never to interpret arbitrary user-typed text as a tag.
+const HISTORY_TAG_REGEX = /\{\{[^{}]*\}\}/g;
+
+// "date is down to the seconds" (as specified) -- reuses the exact {{ time=FORMAT }} engine
+// (formatDateTime) so History's own date text renders through the same, already-verified
+// formatting code as every other date in the app, rather than a second hand-rolled date formatter.
+function historyDate(date: Date): string {
+  return formatDateTime(date, 'MM/dd/yyyy HH:mm:ss');
+}
+
+// Appends a new `{{ ... }}` tag to a History entry's existing note text, per explicit direction:
+// append, never overwrite. A blank base note (a product with no note typed, or a brand-new object's
+// first appearance) omits the leading separator so the tag doesn't start with a stray space.
+function appendHistoryTag(note: string, tag: string): string {
+  return note ? `${note} ${tag}` : tag;
+}
+
+// Bounds how many `{{ ... }}` tags one entry's note can carry: once over the cap, the OLDEST
+// (earliest-appended, i.e. leftmost) tags are dropped first -- the human-authored base text before
+// the first tag is never touched. A note with no tags, or at/under the cap, is returned unchanged.
+function capHistoryTags(note: string, maxTags: number): string {
+  const tags = note.match(HISTORY_TAG_REGEX);
+  if (!tags || tags.length <= maxTags) return note;
+  let result = note;
+  for (let i = 0; i < tags.length - maxTags; i++) {
+    result = result.replace(tags[i], '');
+  }
+  // Collapse any doubled-up spacing left behind by a removed middle tag, and trim a now-possibly-
+  // leading/trailing space from removing the very first or last tag.
+  return result.replace(/ {2,}/g, ' ').trim();
+}
+
+// Enforces History's growth policy (see the section comment above) on a full entries array, in
+// this exact order: (1) FIFO-evict whole entries from the FRONT (oldest) while the JSON-encoded
+// array exceeds the safe byte ceiling, then (2) apply the count-based safety net the same way.
+// Entries are only ever appended at the end elsewhere in this file, so "front of the array" and
+// "oldest" are the same thing -- no separate timestamp/sequence field is needed to know eviction
+// order.
+function enforceHistoryCap(entries: SelectionEntry[]): SelectionEntry[] {
+  let next = entries;
+  while (next.length > 0 && JSON.stringify(next).length > HISTORY_SAFE_BYTES) {
+    next = next.slice(1);
+  }
+  if (next.length > HISTORY_MAX_ENTRIES) {
+    next = next.slice(next.length - HISTORY_MAX_ENTRIES);
+  }
+  return next;
+}
+
+// One object (product or existing note) that a completed download actually read from, and the tag
+// its History entry should gain for this occurrence.
+interface HistoryTouch {
+  id: string;
+  // The object's OWN current note text -- used as this entry's starting note ONLY the first time it
+  // appears in History; ignored on every later occurrence (the entry's own accumulated note, tags
+  // included, is what continues to grow from then on).
+  baseNote: string;
+  tag: string;
+}
+
+// Applies a batch of HistoryTouch updates to the current History array: an id already present gets
+// another tag appended (capped -- see capHistoryTags) to its EXISTING entry; a new id gets a fresh
+// entry seeded from its current live note. Order is preserved for existing entries; new entries join
+// the end, in touches' own order. Pure -- the caller (mutateHistory) is the one that actually reads/
+// writes the metafield.
+function applyHistoryTouches(current: SelectionEntry[], touches: HistoryTouch[]): SelectionEntry[] {
+  const byId = new Map(current.map((e): [string, SelectionEntry] => [e.id, e]));
+  const order = current.map((e) => e.id);
+  for (const touch of touches) {
+    const existing = byId.get(touch.id);
+    const baseNote = existing ? existing.note : touch.baseNote;
+    byId.set(touch.id, {
+      id: touch.id,
+      note: capHistoryTags(appendHistoryTag(baseNote, touch.tag), HISTORY_MAX_TAGS_PER_ENTRY),
+    });
+    if (!existing) order.push(touch.id);
+  }
+  return enforceHistoryCap(order.map((id) => byId.get(id)!));
+}
+
+// Appends one brand-new, free-standing log entry (resubtitled / cleared / template created or
+// destroyed) -- always a NEW entry, never merged into an existing one, since these events have no
+// natural "same object" to update in place.
+function appendHistoryLogNote(current: SelectionEntry[], text: string): SelectionEntry[] {
+  return enforceHistoryCap([...current, createNoteEntry(text)]);
+}
+
 // Maximum length of a public selection's subtitle, shown under its name in the Selections menu.
 const SUBTITLE_MAX_LENGTH = 16;
 // Single shop metafield holding every public selection's subtitle, keyed by slot id.
@@ -340,7 +466,7 @@ function selectionMetafieldKey(slot: SelectionSlotId): string | null {
   return `sel_public_${slot.slice(-1)}`;
 }
 
-const SELECTIONS_READ_QUERY = `query ReadSelections($ns: String!, $pub1: String!, $pub2: String!, $pub3: String!, $pub4: String!, $pub5: String!, $pub6: String!, $subs: String!) {
+const SELECTIONS_READ_QUERY = `query ReadSelections($ns: String!, $pub1: String!, $pub2: String!, $pub3: String!, $pub4: String!, $pub5: String!, $pub6: String!, $subs: String!, $hist: String!) {
   shop {
     id
     pub1: metafield(namespace: $ns, key: $pub1) { value }
@@ -350,6 +476,18 @@ const SELECTIONS_READ_QUERY = `query ReadSelections($ns: String!, $pub1: String!
     pub5: metafield(namespace: $ns, key: $pub5) { value }
     pub6: metafield(namespace: $ns, key: $pub6) { value }
     subs: metafield(namespace: $ns, key: $subs) { value }
+    hist: metafield(namespace: $ns, key: $hist) { value }
+  }
+}`;
+
+// History's own metafield is re-read on demand by mutateHistory (see its comment) immediately
+// before every write, same as mutateTemplateList/saveSelectionDraft already do for their own
+// metafields -- this narrower query avoids re-fetching all 6 public selections + subtitles just to
+// log one event.
+const HISTORY_READ_QUERY = `query ReadHistory($ns: String!, $key: String!) {
+  shop {
+    id
+    hist: metafield(namespace: $ns, key: $key) { value }
   }
 }`;
 
@@ -3955,7 +4093,16 @@ function planCombined(
   selectionLength: number,
   primaryDomain: string,
   now: Date,
-): { fileCount: number; render: (fileIndex: number | null) => string } {
+): {
+  fileCount: number;
+  render: (fileIndex: number | null) => string;
+  // The object (product/variant/note) ids actually read by each output file, index-aligned with
+  // `render`'s own fileIndex -- one entry when fileCount is 1 (fileIndex is passed as null then).
+  // Used only for History logging (session 17); has no effect on rendering itself. May contain
+  // duplicate ids WITHIN one file's list (e.g. two of one product's variant-rows merged into the
+  // same group by Merge IF) -- callers dedupe before using this.
+  sourceIdsByIndex: string[][];
+} {
   const rows = expandSelectionToRows(products);
   const first = rows[0];
   const withoutComments = flattenForeachInsideWhile(stripComments(applyWhitespaceTokens(body)));
@@ -3982,6 +4129,15 @@ function planCombined(
     : null;
   const grouped = mergeCondition.trim() !== '' && groups != null && groups.length > 1;
   const fileCount = grouped ? (groups as number[][]).length : 1;
+
+  // Session 17 (History): which object(s) each file actually reads. Grouped: one list per group,
+  // by the group's own iterated-item indices. Not grouped (always exactly 1 file): every iterated
+  // item if a selection-scope foreach exists, else just `first` -- matching this function's own
+  // "no foreach -> resolves against the first object" rule (see the render closure's `first` use
+  // and the roadmap's "selection mode without a foreach" resolution).
+  const sourceIdsByIndex: string[][] = grouped
+    ? (groups as number[][]).map((g) => g.map((i) => (iteratedItems as KindedRow[])[i].row.id))
+    : [iteratedItems ? iteratedItems.map((item) => item.row.id) : first ? [first.id] : []];
 
   // No neighbor/position is defined OUTSIDE a selection-scope foreach loop at the top level of
   // 'selection' mode -- only a plain body token (resolving against `first`, matching how
@@ -4013,7 +4169,7 @@ function planCombined(
     return restoreWhitespaceTokens(applyWrapBlocks(substituted));
   };
 
-  return { fileCount, render };
+  return { fileCount, render, sourceIdsByIndex };
 }
 
 // PER-PRODUCT mode: evaluate the template against a single row/unit (one product + one variant, a
@@ -4282,6 +4438,11 @@ interface FilePlan {
   count: number;
   zipName: string | null;
   build: (index: number) => ZipEntry;
+  // Session 17 (History): the object (product/variant/note) id(s) each planned file actually reads,
+  // index-aligned with `build`'s own index. Only consumed by the download-preparation effect (for
+  // History logging); the editor preview (buildOutputFiles/OutputFiles) never reads this. May
+  // contain duplicate ids within one file's list -- see planCombined's own comment on this field.
+  sourceIdsByIndex: string[][];
 }
 
 // Wrap a free-standing note entry (a SelectionEntry where isStandaloneNote is true) as a ProductData
@@ -4408,6 +4569,7 @@ function planOutputFiles(
             'File break before downloading or previewing it.',
         );
       },
+      sourceIdsByIndex: [],
     };
   }
   const ext = sanitizeExtension(templateExtension);
@@ -4440,6 +4602,7 @@ function planOutputFiles(
         count: 1,
         zipName: null,
         build: () => ({ name, content: combined.render(null) }),
+        sourceIdsByIndex: combined.sourceIdsByIndex,
       };
     }
     return {
@@ -4451,6 +4614,7 @@ function planOutputFiles(
         name: `${timestamp}_looped_${titleSlug}_${index}.${ext}`,
         content: combined.render(index),
       }),
+      sourceIdsByIndex: combined.sourceIdsByIndex,
     };
   }
 
@@ -4485,6 +4649,7 @@ function planOutputFiles(
       build: () => {
         throw new Error('No files to build for this selection and file-break mode.');
       },
+      sourceIdsByIndex: [],
     };
   }
 
@@ -4526,6 +4691,7 @@ function planOutputFiles(
         count: 1,
         zipName: null,
         build: () => ({ name: `${baseName}.${ext}`, content: renderGroup([0]) }),
+        sourceIdsByIndex: [[units[0].row.id]],
       };
     }
     const names = dedupeNames(units.map((u) => u.baseName)).map((base) => `${base}.${ext}`);
@@ -4533,6 +4699,7 @@ function planOutputFiles(
       count: units.length,
       zipName: `${titleSlug}_zipped_${timestamp}.zip`,
       build: (index: number) => ({ name: names[index], content: renderGroup([index]) }),
+      sourceIdsByIndex: units.map((u) => [u.row.id]),
     };
   }
   if (groups.length === 1) {
@@ -4541,6 +4708,7 @@ function planOutputFiles(
       count: 1,
       zipName: null,
       build: () => ({ name, content: renderGroup(groups[0]) }),
+      sourceIdsByIndex: [groups[0].map((i) => kindedUnits[i].row.id)],
     };
   }
   return {
@@ -4550,6 +4718,7 @@ function planOutputFiles(
       name: `${timestamp}_looped_${titleSlug}_${index}.${ext}`,
       content: renderGroup(groups[index]),
     }),
+    sourceIdsByIndex: groups.map((g) => g.map((i) => kindedUnits[i].row.id)),
   };
 }
 
@@ -4845,6 +5014,16 @@ function Extension() {
   const [subtitleDraft, setSubtitleDraft] = useState<string>('');
   const [subtitleBaseline, setSubtitleBaseline] = useState<string>('');
   const [selectionsError, setSelectionsError] = useState<string | null>(null);
+  // History (session 17): raw stored entries (product references + free-standing log notes),
+  // exactly as parsed from the history_log metafield -- loaded alongside the 6 public selections
+  // (loadSelections/refreshAll) so it's ready by the time the Settings page's History panel opens.
+  // The History panel hydrates full ProductData for the product-type entries itself, on open (see
+  // openSettings), the same way openSelectionView already does for a public slot.
+  const [historyEntries, setHistoryEntries] = useState<SelectionEntry[]>([]);
+  const [historyProducts, setHistoryProducts] = useState<ProductData[]>([]);
+  const [historyLoading, setHistoryLoading] = useState<boolean>(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historySearch, setHistorySearch] = useState<string>('');
   const [selectionSlot, setSelectionSlot] = useState<SelectionSlotId | null>(null);
   const [selectionDraft, setSelectionDraft] = useState<ProductData[]>([]);
   // The OPEN selection's own combined product+note order, by id -- seeded on openSelectionView from
@@ -4949,6 +5128,11 @@ function Extension() {
   // Monotonically increasing id of the newest preparation run, so an outdated in-flight build stops
   // as soon as the selection or template changes again.
   const downloadBuildRef = useRef<number>(0);
+  // History (session 17): the touches (object id + {{ file=NAME }} tag) for whichever download is
+  // CURRENTLY prepared -- written by the download-preparation effect below, read once by
+  // onDownloadClick when the merchant actually clicks the download link. A ref, not state: nothing
+  // ever needs to re-render off this value.
+  const pendingDownloadTouchesRef = useRef<HistoryTouch[]>([]);
   // Preview: which generated file the preview modal is currently showing (0-based).
   const [previewIndex, setPreviewIndex] = useState<number>(0);
 
@@ -5122,6 +5306,40 @@ function Extension() {
     return nextList;
   };
 
+  // History's own read-mutate-write flow (session 17), the same shape as mutateTemplateList above:
+  // re-read the metafield immediately before writing (minimizing, not eliminating, the race window
+  // against a concurrent staff action logging its own entry at the same time -- the same accepted
+  // model every other mutation in this file already uses), apply `mutate`, write the result. History
+  // logging is deliberately best-effort: a failure here is silently swallowed rather than surfaced
+  // to the merchant, since it is bookkeeping alongside whatever real action they took (a download, a
+  // save, a delete) -- that real action's own success/failure is reported normally regardless of
+  // whether logging it to History succeeded. On success, also updates historyEntries directly (skips
+  // a redundant re-read) so the History panel reflects the write immediately if it happens to be open.
+  const mutateHistory = async (
+    mutate: (current: SelectionEntry[]) => SelectionEntry[],
+  ): Promise<void> => {
+    try {
+      const ownerId = await ensureShopId(() => {});
+      if (!ownerId) return;
+      const { data } = await shopify.query(HISTORY_READ_QUERY, {
+        variables: { ns: TEMPLATE_NAMESPACE, key: HISTORY_KEY },
+      });
+      const current = parseSelectionItems(data?.shop?.hist?.value);
+      const next = mutate(current);
+      const { errors } = await shopify.query(TEMPLATES_WRITE_MUTATION, {
+        variables: {
+          metafields: [
+            { ownerId, namespace: TEMPLATE_NAMESPACE, key: HISTORY_KEY, type: 'json', value: JSON.stringify(next) },
+          ],
+        },
+      });
+      if (errors?.length) return;
+      setHistoryEntries(next);
+    } catch {
+      // Best-effort, as above -- nothing to surface.
+    }
+  };
+
   // --------------------------------------------------------------------------------------------
   // Data layer: product fetching & caching
   // --------------------------------------------------------------------------------------------
@@ -5248,6 +5466,7 @@ function Extension() {
           pub5: 'sel_public_5',
           pub6: 'sel_public_6',
           subs: SUBTITLES_KEY,
+          hist: HISTORY_KEY,
         },
       });
       if (errors?.length) {
@@ -5293,6 +5512,7 @@ function Extension() {
       setSelectionNotes(noteEntries);
       setSelectionSlotOrderIndex(slotOrderIndex as Record<PublicSelectionSlotId, Record<string, number>>);
       setSelectionSubtitles(parseSubtitles(shop?.subs?.value));
+      setHistoryEntries(parseSelectionItems(shop?.hist?.value));
     } catch (err: any) {
       setSelectionsError(err?.message || 'Failed to load saved selections.');
     }
@@ -5604,10 +5824,36 @@ function Extension() {
     setEditorError(null);
   };
 
-  // Settings page: currently blank (placeholder for future settings), reached from the gear
-  // button on the main page's header-actions row.
-  const openSettings = (): void => {
+  // Settings page: reached from the gear button on the main page's header-actions row. The right
+  // 1/3 (Settings itself) is blank for now, per explicit direction; the left 2/3 (History) hydrates
+  // full ProductData for its product-type entries on open, the same way openSelectionView already
+  // does for a public slot -- historyEntries itself (raw stored entries) is already kept loaded at
+  // all times (loadSelections/refreshAll), so only the product HYDRATION is deferred to here.
+  const openSettings = async (): Promise<void> => {
     setView('settings');
+    setHistorySearch('');
+    setHistoryError(null);
+    const productIds = historyEntries
+      .filter((e: SelectionEntry) => !isStandaloneNote(e))
+      .map((e: SelectionEntry) => e.id);
+    if (productIds.length === 0) {
+      setHistoryProducts([]);
+      return;
+    }
+    setHistoryLoading(true);
+    try {
+      const { products, error } = await loadProductsByIds(productIds);
+      if (error) {
+        setHistoryError(error);
+        setHistoryProducts([]);
+        return;
+      }
+      setHistoryProducts(products);
+    } catch (err: any) {
+      setHistoryError(err?.message || 'Failed to load history.');
+    } finally {
+      setHistoryLoading(false);
+    }
   };
 
   // Whether the editor has unsaved changes compared to the values when it was opened.
@@ -5642,6 +5888,11 @@ function Extension() {
     setEditorFileBreakError(null);
     setEditorError(null);
     setSaving(true);
+    // Captured before the mutation below (which doesn't itself touch editingTemplate) -- true only
+    // for a genuinely new template, matching the exact same condition the editor's own heading
+    // ("New template" vs "Edit template") already uses. An edit to an existing template is not
+    // logged -- only creation and destruction (confirmDelete) are, per explicit direction.
+    const isNewTemplate = !editingTemplate;
     try {
       const savedId = editingTemplate ? editingTemplate.id : generateTemplateId(editorTitle);
       const nextList = await mutateTemplateList((currentList) => {
@@ -5672,6 +5923,10 @@ function Extension() {
         fileBreak: editorFileBreak,
         mergeCondition: editorMergeCondition,
       };
+      if (isNewTemplate) {
+        const text = `Template {{ template_title=${editorTitle}, action=created, date=${historyDate(new Date())} }}`;
+        mutateHistory((current) => appendHistoryLogNote(current, text));
+      }
       setView('main');
     } catch (err: any) {
       setEditorError(err?.message || 'Failed to save template.');
@@ -5730,6 +5985,9 @@ function Extension() {
     setDeleting(true);
     try {
       const deleteId = pendingDeleteId;
+      // Looked up before the mutation removes it from `templates` -- confirmDelete's own list
+      // still has it, since fetchTemplates hasn't re-run yet.
+      const deletedTitle = templates.find((t: TemplateData) => t.id === deleteId)?.title || deleteId;
       const nextList = await mutateTemplateList(
         (currentList) => currentList.filter((t) => t.id !== deleteId),
         setDeleteError,
@@ -5742,6 +6000,8 @@ function Extension() {
       }
       setPendingDeleteId(null);
       setDeleteError(null);
+      const text = `Template {{ template_title=${deletedTitle}, action=destroyed, date=${historyDate(new Date())} }}`;
+      mutateHistory((current) => appendHistoryLogNote(current, text));
       await fetchTemplates();
     } catch (err: any) {
       setDeleteError(err?.message || 'Failed to delete template.');
@@ -5883,6 +6143,31 @@ function Extension() {
           setDownloadProgress(null);
           return;
         }
+        // History (session 17): which object(s) each just-built file actually reads (deduped per
+        // file -- see FilePlan.sourceIdsByIndex's own comment on why one file's list can otherwise
+        // repeat an id), turned into one {{ file=NAME }} touch per object, seeded with that object's
+        // OWN current note (used only if this is its first-ever appearance in History -- see
+        // HistoryTouch's comment). Captured here, at BUILD time, but not written to History until
+        // the merchant actually clicks the download link (onDownloadClick) -- this effect runs
+        // reactively on every selection/template change, long before any real download happens, so
+        // logging here instead would log far more often than an actual download occurs.
+        if (downloadBuildRef.current === buildId) {
+          const fileNameByObjectId = new Map<string, string>();
+          for (let index = 0; index < files.length; index++) {
+            const ids = new Set(plan.sourceIdsByIndex[index] || []);
+            for (const id of ids) fileNameByObjectId.set(id, files[index].name);
+          }
+          const noteById = new Map<string, string>();
+          for (const p of selectedProductList) noteById.set(p.id, p.note || '');
+          for (const n of noteObjects) noteById.set(n.id, n.note);
+          pendingDownloadTouchesRef.current = Array.from(fileNameByObjectId.entries()).map(
+            ([id, fileName]): HistoryTouch => ({
+              id,
+              baseNote: noteById.get(id) || '',
+              tag: `{{ file=${fileName} }}`,
+            }),
+          );
+        }
         if (plan.zipName == null) {
           const single = files[0];
           const mediaType = mediaTypeForExtension(sanitizeExtension(tpl.extension));
@@ -5923,6 +6208,13 @@ function Extension() {
   const onDownloadClick = (): void => {
     if (!download) return;
     setConfirmedName(download.name);
+    // History (session 17): only actual downloads are logged, never a preview -- see
+    // pendingDownloadTouchesRef's own comment for why this is captured at build time but only
+    // written here, on the real click.
+    if (pendingDownloadTouchesRef.current.length > 0) {
+      const touches = pendingDownloadTouchesRef.current;
+      mutateHistory((current) => applyHistoryTouches(current, touches));
+    }
   };
 
   // --------------------------------------------------------------------------------------------
@@ -6337,6 +6629,16 @@ function Extension() {
       }
       return changed ? next : prev;
     });
+    // History (session 17): "selection loaded" only applies to a PUBLIC slot -- loading "Current"
+    // into itself has no NUM/subtitle to reference and isn't a meaningful event to log.
+    if (isPublicSelection && selectionSlot) {
+      const tag = `{{ selection_number=${selectionSlot.slice(-1)}, selection_sub_title=${subtitleDraft}, date=${historyDate(new Date())} }}`;
+      const touches: HistoryTouch[] = [
+        ...productsToLoad.map((p: ProductData): HistoryTouch => ({ id: p.id, baseNote: p.note || '', tag })),
+        ...notesToLoad.map((n: SelectionEntry): HistoryTouch => ({ id: n.id, baseNote: n.note, tag })),
+      ];
+      mutateHistory((current) => applyHistoryTouches(current, touches));
+    }
   };
 
   // Persist the draft. A saved slot writes its product ids to its shop metafield; "Current Selection"
@@ -6431,6 +6733,59 @@ function Extension() {
       if (message) {
         setSelectionError(message);
         return false;
+      }
+      // History (session 17): "added" / "resubtitled" / "cleared" are all draft edits gated behind
+      // Save (per this app's existing "Add to Selection alone only edits the in-memory draft" model
+      // -- see architecture-notes.md), so they're logged HERE, from a before/after diff against what
+      // was actually persisted, rather than at the moment a button was clicked -- an add/resubtitle/
+      // clear that gets abandoned (Stay, or navigating away) is never logged, only one that's
+      // actually saved. Deliberately scoped to public slots only, matching "cleared"'s own
+      // public-only decision -- 'current' returns before reaching this branch. One batched
+      // mutateHistory call covers all three, alongside the metafield write above.
+      const numberLabel = selectionSlot.slice(-1);
+      const oldIds = new Set([
+        ...(selectionEntries[selectionSlot] || []).map((e: SelectionEntry) => e.id),
+        ...(selectionNotes[selectionSlot] || []).map((e: SelectionEntry) => e.id),
+      ]);
+      const addedTouches: HistoryTouch[] = [
+        ...entries
+          .filter((e: SelectionEntry) => !oldIds.has(e.id))
+          .map(
+            (e: SelectionEntry): HistoryTouch => ({
+              id: e.id,
+              baseNote: e.note,
+              tag: `{{ selection_number=${numberLabel}, selection_sub_title=${trimmedSubtitle}, action=added, date=${historyDate(new Date())} }}`,
+            }),
+          ),
+        ...selectionNoteDraft
+          .filter((n: SelectionEntry) => !oldIds.has(n.id))
+          .map(
+            (n: SelectionEntry): HistoryTouch => ({
+              id: n.id,
+              baseNote: n.note,
+              tag: `{{ selection_number=${numberLabel}, selection_sub_title=${trimmedSubtitle}, action=added, date=${historyDate(new Date())} }}`,
+            }),
+          ),
+      ];
+      const oldSubtitle = selectionSubtitles[selectionSlot] || '';
+      const resubtitled = oldSubtitle !== trimmedSubtitle;
+      const cleared = oldIds.size > 0 && entries.length === 0 && selectionNoteDraft.length === 0;
+      if (addedTouches.length > 0 || resubtitled || cleared) {
+        mutateHistory((current) => {
+          let next = current;
+          if (addedTouches.length > 0) {
+            next = applyHistoryTouches(next, addedTouches);
+          }
+          if (resubtitled) {
+            const text = `Selection {{ selection_number=${numberLabel}, old_sub_title=${oldSubtitle}, new_sub_title=${trimmedSubtitle}, date=${historyDate(new Date())} }}`;
+            next = appendHistoryLogNote(next, text);
+          }
+          if (cleared) {
+            const text = `Selection {{ selection_number=${numberLabel}, selection_sub_title=${trimmedSubtitle}, action=cleared, date=${historyDate(new Date())} }}`;
+            next = appendHistoryLogNote(next, text);
+          }
+          return next;
+        });
       }
       setSelectionEntries((prev) => ({ ...prev, [selectionSlot]: entries }));
       setSelectionNotes((prev) => ({ ...prev, [selectionSlot]: selectionNoteDraft }));
@@ -7102,31 +7457,36 @@ function Extension() {
 
   const renderMainView = () => (
     <s-page heading="Template to File" inlineSize="large">
-      <s-stack slot="header-actions" direction="inline" gap="base">
-        <s-button onClick={clearProductSelection}>Clear Product Selection</s-button>
-        <s-button onClick={clearTemplateSelection}>Clear Template Selection</s-button>
-        <s-button loading={refreshing} disabled={refreshing} onClick={refreshAll}>
-          Refresh Page
-        </s-button>
-        {canDownload && download ? (
-          <s-link
-            href={download.href}
-            download={download.name}
-            commandFor="download-confirm-modal"
-            command="--show"
-            onClick={onDownloadClick}
-          >
-            <s-button variant="primary">Download Files</s-button>
-          </s-link>
-        ) : (
-          <s-button variant="primary" disabled loading={preparingDownload}>
-            Download Files
+      <s-stack slot="header-actions" direction="inline" gap="base" justifyContent="space-between">
+        {/* Being last in a single left-anchored stack only pushes Settings after the other
+            buttons, not all the way to the row's right edge -- the whole stack hugs the left
+            (above Products, the grid's wider 2fr column) unless something forces the two ends
+            apart. Splitting into two inline groups under one justifyContent="space-between"
+            stack pins this group to the left and the Settings group to the right edge, landing
+            it above the Templates column (the narrower 1fr column below) regardless of how wide
+            either group is. */}
+        <s-stack direction="inline" gap="base">
+          <s-button onClick={clearProductSelection}>Clear Product Selection</s-button>
+          <s-button onClick={clearTemplateSelection}>Clear Template Selection</s-button>
+          <s-button loading={refreshing} disabled={refreshing} onClick={refreshAll}>
+            Refresh Page
           </s-button>
-        )}
-        {/* Last in this row, on purpose: header-actions reads left-to-right, and this is the one
-            action meant to land at the row's right edge, above the Templates column (the grid's
-            narrower 1fr column below) rather than clustered with the selection/download actions
-            above Products (2fr). */}
+          {canDownload && download ? (
+            <s-link
+              href={download.href}
+              download={download.name}
+              commandFor="download-confirm-modal"
+              command="--show"
+              onClick={onDownloadClick}
+            >
+              <s-button variant="primary">Download Files</s-button>
+            </s-link>
+          ) : (
+            <s-button variant="primary" disabled loading={preparingDownload}>
+              Download Files
+            </s-button>
+          )}
+        </s-stack>
         <s-button icon="settings" accessibilityLabel="Settings" onClick={openSettings}>
           Settings
         </s-button>
@@ -7626,13 +7986,136 @@ function Extension() {
     </s-page>
   );
 
-  // Blank for now, per explicit direction -- just the page shell and the way back to the main
-  // view. Settings themselves are a future pass.
+  // History (session 17): a read-only combined product+note view, built the same way the Selection
+  // view's own combined table is (combineSelectionRows/SelectionRow/productMatchesQuery/
+  // noteMatchesQuery), just with no editing/reordering/removal -- see the History section comment
+  // (near HISTORY_KEY) for why. Newest-first: historyEntries itself is oldest-first (entries are
+  // only ever appended at the end -- see enforceHistoryCap's comment), so the order index here
+  // deliberately reverses it for display, matching how an activity log is normally read.
+  const historyLogNotes = useMemo<SelectionEntry[]>(
+    () => historyEntries.filter((e: SelectionEntry) => isStandaloneNote(e)),
+    [historyEntries],
+  );
+  const historyNoteById = useMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = {};
+    for (const e of historyEntries) {
+      if (!isStandaloneNote(e)) map[e.id] = e.note;
+    }
+    return map;
+  }, [historyEntries]);
+  // historyProducts is fetched fresh (loadProductsByIds/mapProduct), which never attaches a note of
+  // its own -- History's actual note text (the accumulated {{ ... }} tags) comes from historyEntries
+  // instead, merged in here the same way openSelectionView already merges a stored note onto a
+  // freshly-fetched product.
+  const historyProductsWithNotes = useMemo<ProductData[]>(
+    () => historyProducts.map((p: ProductData) => ({ ...p, note: historyNoteById[p.id] || '' })),
+    [historyProducts, historyNoteById],
+  );
+  const historyOrderIndex = useMemo<Record<string, number>>(() => {
+    const idx: Record<string, number> = {};
+    historyEntries.forEach((e: SelectionEntry, i: number) => {
+      idx[e.id] = historyEntries.length - 1 - i;
+    });
+    return idx;
+  }, [historyEntries]);
+  const historyCombinedAll = useMemo<SelectionRow[]>(
+    () => combineSelectionRows(historyProductsWithNotes, historyLogNotes, historyOrderIndex),
+    [historyProductsWithNotes, historyLogNotes, historyOrderIndex],
+  );
+  const historyRowsFiltered = useMemo<SelectionRow[]>(() => {
+    const term = historySearch.trim();
+    if (term === '') return historyCombinedAll;
+    return historyCombinedAll.filter((row: SelectionRow) =>
+      row.kind === 'product' ? productMatchesQuery(row.product, term) : noteMatchesQuery(row.note, term),
+    );
+  }, [historyCombinedAll, historySearch]);
+
+  // Left 2/3 is History (automatic, read-only -- search is its only control); right 1/3 is Settings
+  // itself, blank for now per explicit direction, a future pass fills it in.
   const renderSettingsView = () => (
     <s-page heading="Settings">
       <s-button slot="header-actions" icon="arrow-left" onClick={backToMain}>
         Back
       </s-button>
+      <s-grid gridTemplateColumns="2fr 1fr" gap="base">
+        <s-section heading="History" padding="none">
+          <s-box padding="base">
+            <s-stack gap="base">
+              {historyError ? (
+                <s-banner tone="critical" heading="Could not load history">
+                  <s-text>{historyError}</s-text>
+                </s-banner>
+              ) : null}
+              <s-search-field
+                label="Search history"
+                labelAccessibilityVisibility="exclusive"
+                placeholder="Search history…"
+                value={historySearch}
+                onInput={(e: any) => setHistorySearch(e.currentTarget.value)}
+              />
+              <s-table loading={historyLoading}>
+                <s-table-header-row>
+                  <s-table-header listSlot="primary">Item</s-table-header>
+                  <s-table-header>Handle</s-table-header>
+                  <s-table-header>Qty</s-table-header>
+                  <s-table-header>History</s-table-header>
+                </s-table-header-row>
+                <s-table-body>
+                  {historyRowsFiltered.length === 0 && !historyLoading ? (
+                    <s-table-row>
+                      <s-table-cell>
+                        <s-text color="subdued">
+                          {historyCombinedAll.length === 0 ? 'No history yet.' : 'No items found.'}
+                        </s-text>
+                      </s-table-cell>
+                      <s-table-cell />
+                      <s-table-cell />
+                      <s-table-cell />
+                    </s-table-row>
+                  ) : (
+                    historyRowsFiltered.map((row: SelectionRow) => (
+                      <s-table-row key={row.id}>
+                        <s-table-cell>
+                          {row.kind === 'product' ? (
+                            <s-stack direction="inline" gap="small" alignItems="center">
+                              {row.product.imageUrl ? (
+                                <s-thumbnail
+                                  size="small"
+                                  src={row.product.imageUrl}
+                                  alt={row.product.title}
+                                />
+                              ) : null}
+                              <s-text type="strong">{row.product.title}</s-text>
+                            </s-stack>
+                          ) : (
+                            <s-text type="strong">📝 Note</s-text>
+                          )}
+                        </s-table-cell>
+                        <s-table-cell>
+                          <s-text color="subdued">
+                            {row.kind === 'product' ? row.product.handle : '—'}
+                          </s-text>
+                        </s-table-cell>
+                        <s-table-cell>
+                          <s-text color="subdued">
+                            {row.kind === 'product' ? formatQty(row.product.totalInventory) : '—'}
+                          </s-text>
+                        </s-table-cell>
+                        <s-table-cell>
+                          <s-text>{row.kind === 'product' ? row.product.note : row.note.note}</s-text>
+                        </s-table-cell>
+                      </s-table-row>
+                    ))
+                  )}
+                </s-table-body>
+              </s-table>
+            </s-stack>
+          </s-box>
+        </s-section>
+        <s-section heading="Settings" padding="none">
+          <s-box padding="base" />
+        </s-section>
+      </s-grid>
     </s-page>
   );
 
