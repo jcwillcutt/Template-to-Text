@@ -5128,7 +5128,7 @@ function Extension() {
   // Monotonically increasing id of the newest preparation run, so an outdated in-flight build stops
   // as soon as the selection or template changes again.
   const downloadBuildRef = useRef<number>(0);
-  // History (session 17): the touches (object id + {{ file=NAME }} tag) for whichever download is
+  // History (session 17): the touches (object id + {{ file=NAME, folder=FOLDER }} tag) for whichever download is
   // CURRENTLY prepared -- written by the download-preparation effect below, read once by
   // onDownloadClick when the merchant actually clicks the download link. A ref, not state: nothing
   // ever needs to re-render off this value.
@@ -6143,15 +6143,20 @@ function Extension() {
           setDownloadProgress(null);
           return;
         }
-        // History (session 17): which object(s) each just-built file actually reads (deduped per
-        // file -- see FilePlan.sourceIdsByIndex's own comment on why one file's list can otherwise
-        // repeat an id), turned into one {{ file=NAME }} touch per object, seeded with that object's
-        // OWN current note (used only if this is its first-ever appearance in History -- see
-        // HistoryTouch's comment). Captured here, at BUILD time, but not written to History until
-        // the merchant actually clicks the download link (onDownloadClick) -- this effect runs
-        // reactively on every selection/template change, long before any real download happens, so
-        // logging here instead would log far more often than an actual download occurs.
+        // History (session 17/18): which object(s) each just-built file actually reads (deduped
+        // per file -- see FilePlan.sourceIdsByIndex's own comment on why one file's list can
+        // otherwise repeat an id), turned into one {{ file=NAME, folder=FOLDER }} touch per object,
+        // seeded with that object's OWN current note (used only if this is its first-ever
+        // appearance in History -- see HistoryTouch's comment). `folder` names the ZIP a
+        // multi-file download packages its files into (the name a merchant sees after extracting
+        // it, so the trailing ".zip" is stripped) -- empty when this download produced a single,
+        // unzipped file (plan.zipName is null then), per explicit direction. Captured here, at
+        // BUILD time, but not written to History until the merchant actually clicks the download
+        // link (onDownloadClick) -- this effect runs reactively on every selection/template change,
+        // long before any real download happens, so logging here instead would log far more often
+        // than an actual download occurs.
         if (downloadBuildRef.current === buildId) {
+          const folderName = plan.zipName ? plan.zipName.replace(/\.zip$/i, '') : '';
           const fileNameByObjectId = new Map<string, string>();
           for (let index = 0; index < files.length; index++) {
             const ids = new Set(plan.sourceIdsByIndex[index] || []);
@@ -6164,7 +6169,7 @@ function Extension() {
             ([id, fileName]): HistoryTouch => ({
               id,
               baseNote: noteById.get(id) || '',
-              tag: `{{ file=${fileName} }}`,
+              tag: `{{ file=${fileName}, folder=${folderName} }}`,
             }),
           );
         }
