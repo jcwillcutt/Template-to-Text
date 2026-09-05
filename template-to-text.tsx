@@ -4897,6 +4897,431 @@ function formatGraphQLErrors(
 }
 
 // ----------------------------------------------------------------------------------------------
+// SYNTAX GUIDE (session 19)
+// Hard-coded copy of the user-facing template syntax guide, shown in-app via the Settings page's
+// "Syntax Guide" link (see renderSettingsView). This is now the PRIMARY source of truth for
+// template syntax documentation, per explicit direction -- Documentation/User Docs/
+// template-syntax-guide.txt is no longer updated automatically going forward; this constant is
+// updated instead whenever template syntax changes. Kept as one large template literal so it reads
+// (and is edited) exactly like the plain-text file it was copied from -- the one character that
+// needed escaping is the literal "${{" in the price example below (a template literal's own
+// interpolation trigger), escaped as "\${{" so it renders as literal text instead of being parsed
+// as a JS expression.
+// ----------------------------------------------------------------------------------------------
+const SYNTAX_GUIDE_TEXT = `TEMPLATE TO TEXT -- SYNTAX GUIDE
+=================================
+
+This is a reference for the {{ }} template language used to turn your selected products
+and notes into text files. Write your template body once, and it runs once per output
+file -- how many files that is depends on the File Break setting (see section 12).
+
+Every token is written inside double curly braces: {{ product.title }}
+Spacing inside the braces doesn't matter: {{product.title}} works the same way.
+
+
+1. PRODUCT AND VARIANT FIELDS
+------------------------------
+{{ product.title }}            Product title
+{{ product.handle }}           Product handle (URL slug)
+{{ product.vendor }}           Vendor
+{{ product.productType }}      Product type
+{{ product.status }}           Status (active, draft, archived)
+{{ product.description }}      Description
+{{ product.tags }}             Tags, comma-separated
+{{ product.totalInventory }}   Total inventory across all variants
+{{ product.priceMin }}         Lowest variant price
+{{ product.priceMax }}         Highest variant price
+{{ product.currencyCode }}     Currency code (e.g. USD)
+{{ product.createdAt }}        Created date/time
+{{ product.updatedAt }}        Last updated date/time
+{{ product.note }}             The note you typed for this product (blank if none)
+{{ product.length }}           How many variants this product has
+
+{{ variant.title }}            Variant title
+{{ variant.sku }}              SKU
+{{ variant.price }}            Price
+{{ variant.compareAtPrice }}   Compare-at price
+{{ variant.costPerItem }}      Cost per item
+{{ variant.barcode }}          Barcode
+{{ variant.inventoryQuantity }} Inventory for this specific variant
+
+{{ product.compareAtPrice }} and {{ product.costPerItem }} also work -- outside a
+variant loop they report the first variant's values.
+
+Example:
+  {{ product.title }} ({{ product.vendor }}) -- {{ variant.sku }}, \${{ variant.price }}
+  -->  Blue Mug (Acme Co) -- MUG-BLU-01, $12.00
+
+
+2. METAFIELDS
+-------------
+{{ product.metafield.NAMESPACE.KEY }}
+
+Example:
+  {{ product.metafield.custom.material }}
+  -->  Ceramic
+
+Use "Insert variable" in the editor to pick from every metafield your loaded products
+actually have -- it fills in the namespace and key for you.
+
+Don't know which metafields a product has, or want every one of them? Loop over them
+instead -- see the metafields loop in section 8.
+
+
+3. DATE, TIME, AND SHOP TOKENS
+--------------------------------
+{{ time=FORMAT }}     Formats the date/time this download was made, however you like.
+{{ primaryDomain }}   Your shop's domain -> myshop.myshopify.com
+
+Build FORMAT out of these letters (repeat a letter to change how it's shown):
+  d / dd            day of month              -> 3 / 03
+  ddd / dddd        weekday name              -> Tues / Tuesday
+  M / MM            month number              -> 3 / 03
+  MMM / MMMM        month name                -> Mar / March
+  y / yy / yyyy     year                      -> 26 / 26 / 2026
+  h / hh            hour, 12-hour clock       -> 6 / 06
+  H / HH            hour, 24-hour clock       -> 6 / 06
+  m / mm            minutes                   -> 5 / 05
+  s / ss            seconds                   -> 7 / 07
+  t / tt            AM or PM                  -> A / AM
+
+Anything else in FORMAT (spaces, commas, dashes, slashes, colons) is printed as-is. Put text
+in quotes if it happens to clash with one of the letters above, e.g. {{ time='at' h:mm tt }}.
+
+Examples:
+  {{ time=MM/dd/yyyy }}                    -->  03/03/2026
+  {{ time=h:mm tt }}                       -->  6:30 AM
+  {{ time=dddd, MMMM d, yyyy }}            -->  Tuesday, March 3, 2026
+
+All files generated in one download share the same date/time.
+
+The older {{ day }} / {{ month }} / {{ year }} / {{ day.week }} / {{ month.name }} /
+{{ year.short }} tokens are retired -- use {{ time=FORMAT }} instead (see the table above for
+the equivalent letters: dd, MM, yyyy, ddd, MMM, yy).
+
+
+4. WHITESPACE TOKENS
+---------------------
+{{ /return }}   A real line break
+{{ /space }}    A single space
+
+Use these when you need whitespace somewhere that would otherwise get trimmed, such as
+inside a wrap block's delineator (see section 12).
+
+
+5. VARIABLES AND MATH
+----------------------
+Any word can be a variable. Seven short names (i, j, k, l, x, y, z) are offered as
+shortcuts, but any name works as long as it isn't one of the reserved words used by
+the tags below (if, while, wrap, repeat, replace, chop, index, insert, comment, length,
+time, tag, break, skip, and a few tag-parameter names like direction/delineator/drop/
+replacement).
+
+Assign:      {{ x = 5 }}          (writes nothing to the output)
+Read:        {{ x }}              (outputs the current value)
+Equation:    {{ = {{x}} + 1 }}    Always start an equation with =, and always wrap a
+                                   variable being used in an equation in its own {{ }}.
+
+Supported operators: + - * / % ^ (and parentheses).
+
+Example:
+  {{ x = 3 }}
+  {{ x = {{ ={{x}}*2 }} }}
+  Total: {{ x }}
+  -->  Total: 6
+
+A variable's value can also be a whole text-tool block (Replace, Chop, an If block, ...), which
+lets you "clean up" a string in one place at the top of your template and reuse the cleaned
+version everywhere else. Reassigning the SAME variable from its own current value chains multiple
+tools together:
+  {{ title = {{ #replace=&, replacement=and }}{{ product.title }}{{/replace}} }}
+  {{ title = {{ #replace=/, replacement=- }}{{ title }}{{/replace}} }}
+  ... use {{ title }} anywhere below, with both replacements already applied ...
+
+Want a variable name that's GUARANTEED never to clash with a reserved word (now or in any future
+update)? Start it with $:
+  {{ $title = 5 }}     Assign
+  {{ $title }}         Read
+A name starting with $ is never checked against the reserved-word list at all -- it can't collide
+with "length", "time", or any word a future tool might reserve. This is entirely optional: bare
+names ({{ x }}) work exactly as before and always will. Use "Assign variable ($, collision-safe)"
+in the editor's Insert menu to insert one.
+
+
+6. BOOLEAN CONDITIONS
+-----------------------
+{{ TRUE != FALSE }}   ->  TRUE
+{{ 3 > 2 }}            ->  TRUE
+{{ product.vendor == Acme Co }}
+{{ {{x}} >= 10 && {{y}} < 5 }}
+
+Operators: == != < > <= >= && || !   Group with parentheses: {{ (A || B) && C }}
+A condition with no comparison at all is just checked for "truthy" (non-empty,
+non-zero, and not literally FALSE or 0).
+
+
+7. IF / ELSE
+-------------
+{{ #if=CONDITION }}
+  ...shown when TRUE...
+{{ #else }}
+  ...shown when FALSE...
+{{ /if }}
+
+  -if (bool expr, required): tested once; TRUE shows the first branch, FALSE shows {{ #else }}'s
+   branch (or nothing, if there is no {{ #else }})
+  !if: a malformed or empty condition counts as FALSE
+
+Example:
+  {{ #if={{ product.totalInventory }} > 0 }}
+  In stock
+  {{ #else }}
+  Out of stock
+  {{ /if }}
+
+{{ #else }} is optional. If blocks can be nested inside each other and inside loops.
+
+
+8. LOOPS
+---------
+
+8a. Variant loop -- steps through the current product's in-scope variants:
+  -l (var name = start int, optional): which variable holds the step counter, and its
+   starting value. Default: l=0
+  !l: a product with no variants renders the inner content zero times
+  -LABEL (word right after ".foreach", optional): purely cosmetic, not bound to anything --
+   the loop item is always read via {{ variant.* }} no matter what LABEL you use, or omit it
+  Ex:
+  {{ #variants.foreach v, l=0 }}
+  {{ variant.title }}: {{ variant.price }}
+  {{/variants.foreach}}
+
+8b. Tags loop -- steps through the current product's tags:
+  -i (var name = start int, optional): which variable holds the step counter, and its
+   starting value. Default: i=0
+  !i: a product with no tags renders the inner content zero times
+  -LABEL (word right after ".foreach", optional): purely cosmetic, same as the variant loop's
+  Ex:
+  {{ #tags.foreach tag, i=0 }}
+  #{{ tag }}
+  {{/tags.foreach}}
+
+8c. Selection loops -- step through your whole selection (used with File Break set to
+    "Selection", see section 12).
+  -selection.foreach (product / note / object, optional word right after the tag): what to
+   iterate. Default (or "product"/"products"): products only. "note"/"notes": notes only.
+   "object"/"objects": products, then notes
+  -i (var name = start int, optional): which variable holds the step counter, and its
+   starting value. Default: i=0
+  -skip_first (bool, optional): TRUE skips rendering the first iteration's content (still
+   counts it toward the counter). Default: FALSE
+  -skip_last (bool, optional): TRUE skips rendering the last iteration's content. Default: FALSE
+  Ex:
+    {{ #selection.foreach product, i=0 }}
+    {{ i }}. {{ product.title }} -- {{ product.handle }}
+    {{/selection.foreach}}
+    -->  0. Blue Mug -- blue-mug
+         1. Red Mug -- red-mug
+
+8d. Metafields loop -- steps through the current product's metafields:
+  -i (var name = start int, optional): which variable holds the step counter, and its
+   starting value. Default: i=0
+  !i: a product with no metafields renders the inner content zero times
+  -LABEL (word right after ".foreach", optional): purely cosmetic, same as the variant loop's
+  Ex:
+  {{ #metafields.foreach mf, i=0 }}
+  {{ mf.namespace }}.{{ mf.key }}: {{ mf.value }}
+  {{/metafields.foreach}}
+  -->  custom.material: Ceramic
+       custom.color: Blue
+
+8e. While loop -- repeats while a condition is true; you control your own counter:
+  -while (bool expr, required): re-tested before every step; the loop stops the first time
+   this is FALSE
+  !while: runs up to a hard safety cap of 10,000 steps even if the condition never becomes
+   FALSE, so a mistyped condition can't hang a render forever
+  Ex:
+  {{ x = 1 }}
+  {{ #while={{x}}<5 }}
+  {{ x }},
+  {{ x = {{ ={{x}}+1 }} }}
+  {{/while}}
+  -->  1,2,3,4,
+
+Every loop supports {{ break }} (stop the loop now) and {{ skip }} (skip just this
+one iteration) -- almost always used inside an {{ #if=... }} check.
+
+
+9. TEXT TOOLS
+--------------
+Below, each argument is listed as -argument (type): what it means, followed by a ! line
+noting what happens if it's left out or given something invalid. Args with no default shown
+are required; everything else is optional.
+
+Length -- character count of the (fully rendered) inner content:
+  No arguments.
+  Ex:
+  {{ #length }}{{ product.title }}{{/length}}
+  -->  8   (for "Blue Mug")
+
+Chop -- keep everything up to where a condition first becomes true, walking one
+character at a time:
+  -chop (bool expr, required): tested at each step, with the step counter (j by default)
+   bound to the current position
+  !chop: if the condition never becomes true, the whole (unchopped) content is returned; a
+   malformed condition counts as FALSE at every step
+  -direction (L or R): L (default) walks left-to-right, keeping the FRONT of the text; R
+   walks right-to-left, keeping the BACK
+  -j (var name = start int): which variable holds the step counter, and its starting value.
+   Default: j=0
+  Ex:
+  {{ #chop={{ {{j}}==3 }}, direction=L, j=0 }}{{ product.title }}{{/chop}}
+  -->  "Blu"  (first 3 characters; direction=R walks from the right instead)
+
+Repeat -- output the inner content N times:
+  -repeat (positive int, required): number of times to repeat the inner content
+  !repeat: a missing, non-integer, or less-than-1 count renders nothing; a count of exactly
+   1 renders the content once, unchanged
+  -delineator (str): string inserted between repeated copies. Default: none
+  Ex:
+  {{ #repeat=3, delineator=; }}{{ product.sku }}{{/repeat}}
+  -->  SKU1;SKU1;SKU1
+
+Replace -- substitute every occurrence of a substring in the inner content with another:
+  -replace (str, required): the exact text to find (a literal substring match, never a
+   pattern/regex)
+  !replace: an empty or missing SEARCH is a no-op -- the inner content is returned unchanged
+  -replacement (str): the text to put in its place. Default: none (deletes SEARCH)
+  Ex:
+  {{ #replace=$, replacement=&dollar; }}Was \${{ product.price }} now \${{ product.compareAtPrice }}!{{/replace}}
+  --> Was &dollar;10.00 now &dollar;8.00!
+  {{ #replace=aba, replacement=y }}ababab{{/replace}}
+  --> ybab
+
+Index -- one character of the inner content, by position:
+  -index (int, required): 0-based position; negative counts back from the end (-1 is the
+   last character)
+  !index: a missing, non-numeric, or out-of-range position renders nothing
+  Ex:
+  {{ #index=-1 }}{{ product.title }}{{/index}}
+  -->  "g"  (last letter of "Blue Mug")
+
+Insert -- splice the inner content into the SURROUNDING output at a character position:
+  -insert (int, required): the splice point. N >= 0 counts characters INTO the text that
+   follows this block; N < 0 counts characters back from the end of the text that precedes it
+  !insert: a missing or non-integer position leaves the surrounding text unchanged and
+   discards the inner content
+  -drop (bool): what happens when N falls outside the surrounding text's range. FALSE
+   (default) clamps to the nearest end and still inserts the content; TRUE discards the
+   inner content instead
+  Ex:
+  {{ #insert=0, drop=FALSE }}>> {{/insert}}Blue Mug
+  -->  >> Blue Mug
+
+Wrap -- break long text into fixed-width lines:
+  -wrap (positive int, required): max characters per line (the first, unnamed argument)
+  !wrap: a missing, non-integer, or non-positive value leaves the inner content completely
+   unwrapped
+  -min_wraps (int): pad with extra empty lines until at least this many lines exist. 0 or
+   omitted = no minimum
+  -max_wraps (int): stop wrapping after this many lines -- any remaining text is appended,
+   unwrapped, onto the last line. 0 or omitted = no maximum
+  -hard (bool): FALSE (default) breaks only at word boundaries (a word longer than the line
+   width overflows it); TRUE breaks at the exact character width, mid-word if needed
+  -delineator (str): string inserted between lines. Default: none -- use {{ /return }} for a
+   real line break
+  Ex:
+  {{#wrap=10, min_wraps=0, max_wraps=0, hard=FALSE, delineator={{ /return }}}}{{ product.description }}{{/wrap}}
+  --> The Best New
+      Product
+  {{#wrap=10, min_wraps=4, max_wraps=0, hard=FALSE, delineator= / }}{{ product.description }}{{/wrap}}
+  --> The Best /New /Product//
+  {{#wrap=10, min_wraps=0, max_wraps=1, hard=FALSE, delineator= / }}{{ product.description }}{{/wrap}}
+  --> The Best /New Product
+  {{#wrap=3, max_wraps=0, hard=TRUE, delineator=, }}{{ product.description }}{{/wrap}}
+  --> The, Be,st ,New, Pr,odu,ct
+
+10. COMMENTS
+-------------
+{{ #comment }}
+This text is stripped out before the template runs. Use it for notes to yourself.
+{{ /comment }}
+
+
+11. SELECTION-WIDE TOKENS
+---------------------------
+{{ selection.length }}                     Number of products selected
+{{ selection.first.product.handle }}       A field from the FIRST product/variant
+{{ selection.last.product.handle }}        A field from the LAST product/variant
+
+{{ selection.curr.type }}                  What the object currently rendering is:
+{{ selection.next.type }}                  "product", "variant", or "note"
+{{ selection.prev.type }}
+{{ selection.next.product.title }}         A field from the NEXT object in sequence
+{{ selection.prev.product.title }}         A field from the PREVIOUS object
+
+selection.next / selection.prev resolve to nothing when there is no next/previous
+object (the first or last item). These are especially useful with Merge IF (section
+13) to decide whether the next object belongs in this file or a new one.
+
+
+12. FILE BREAK -- HOW MANY FILES YOU GET
+-------------------------------------------
+Every template has a File Break setting, chosen in the editor:
+
+  Variant     One file per variant (the default)
+  Product     One file per product, regardless of variant count
+  Note        One file per note
+  Object      One file per product AND per note, in the order you added them
+  Selection   One file total, with a {{ #selection.foreach }} looping over everyone
+              inside it
+
+Pick the mode that matches what you're building: a packing slip per variant, a
+product sheet per product, a single combined order sheet, etc.
+
+
+13. MERGE IF -- COMBINING FILES CONDITIONALLY
+------------------------------------------------
+Below the File Break setting is a "Merge IF:" condition. Can be used to modify the file
+break behavior. If evaluates to TRUE, the next file's text will be appended to the
+current file's text. If Empty or FALSE, the files do not merge. Can use variables,
+functions, and other objects in the selection using commands and
+selection.curr/next/prev.product/variant.FIELD to reference neighboring objects.
+
+Example -- keep appending products to the same file as long as the next one has the
+same vendor, only starting a new file when the vendor changes:
+  {{ selection.next.product.vendor }} == {{ selection.curr.product.vendor }}
+
+Leave this blank for the ordinary one-file-per-object behavior described above.
+
+
+QUICK REFERENCE
+-----------------
+{{ product.FIELD }}                     {{ variant.FIELD }}
+{{ product.metafield.NS.KEY }}          {{ product.note }}
+{{ time=MM/dd/yyyy }}  {{ time=h:mm tt }}  {{ time=dddd, MMMM d, yyyy }}
+{{ primaryDomain }}                     {{ /return }} {{ /space }}
+{{ x = VALUE }}  {{ x }}                {{ = EXPR }}
+{{ $x = VALUE }}  {{ $x }}              (collision-safe variable form)
+{{ #if=COND }} ... {{ #else }} ... {{ /if }}
+{{ #variants.foreach v, l=0 }} ... {{/variants.foreach}}
+{{ #tags.foreach tag, i=0 }} ... {{/tags.foreach}}
+{{ #metafields.foreach mf, i=0 }} ... {{/metafields.foreach}}
+{{ #selection.foreach product/object/note, i=0 }} ... {{/selection.foreach}}
+{{ #while=COND }} ... {{/while}}          {{ break }}  {{ skip }}
+{{ #length }}TEXT{{/length}}
+{{ #chop=COND, direction=L, j=0 }} ... {{/chop}}
+{{ #repeat=N, delineator=X }} ... {{/repeat}}
+{{ #replace=SEARCH, replacement=REPLACEMENT }} ... {{/replace}}
+{{ #index=N }} ... {{/index}}
+{{ #insert=N, drop=FALSE }} ... {{/insert}}
+{{ #wrap=N, min_wraps=0, max_wraps=0, hard=FALSE, delineator=X}} ... {{/wrap}}
+{{ #comment }} ... {{ /comment }}
+{{ selection.length }}  {{ selection.first.* }}  {{ selection.last.* }}
+{{ selection.curr/next/prev.type }}  {{ selection.curr/next/prev.product/variant.FIELD }}
+`;
+
+// ----------------------------------------------------------------------------------------------
 // EXTENSION COMPONENT
 // State, the data layer (Shopify GraphQL reads/writes), event handlers, and view rendering all
 // live in this one component -- see architecture-notes.md for why that stayed a single component
@@ -7715,15 +8140,14 @@ function Extension() {
                                 <s-checkbox
                                   key={v.id}
                                   label={v.title}
-                                  details={`Qty: ${formatQty(v.inventoryQuantity)}`}
                                   accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
                                   checked={checkedVariantIds.includes(v.id)}
-                                  onChange={(e: any) =>
+                                  onChange={() =>
                                     toggleVariantChecked(
                                       p.id,
                                       allVariantIds,
                                       v.id,
-                                      e.currentTarget.checked,
+                                      !checkedVariantIds.includes(v.id),
                                     )
                                   }
                                 />
@@ -7732,11 +8156,42 @@ function Extension() {
                           ) : null}
                         </s-stack>
                       </s-table-cell>
+                      {/* Handle and Qty mirror the Product cell's own stack shape (same gaps, a
+                          blank spacer line per optional section) purely so their FIRST line stays
+                          level with the product title -- neither column has a per-variant value of
+                          its own to show there, but s-table-cell has no documented vertical-align
+                          control (confirmed against the live component reference), so matching
+                          overall stack height is what keeps them lined up regardless of whichever
+                          way a cell centers its content by default. */}
                       <s-table-cell>
-                        <s-text color="subdued">{p.handle}</s-text>
+                        <s-stack gap="small-400">
+                          <s-text color="subdued">{p.handle}</s-text>
+                          {selectedProducts[p.id] ? <s-text color="subdued"> </s-text> : null}
+                          {selectedProducts[p.id] && p.allVariants.length > 1 ? (
+                            <s-stack gap="small-200">
+                              <s-text color="subdued"> </s-text>
+                              {p.allVariants.map((v: VariantData) => (
+                                <s-text key={v.id} color="subdued"> </s-text>
+                              ))}
+                            </s-stack>
+                          ) : null}
+                        </s-stack>
                       </s-table-cell>
                       <s-table-cell>
-                        <s-text color="subdued">{formatQty(p.totalInventory)}</s-text>
+                        <s-stack gap="small-400">
+                          <s-text color="subdued">{formatQty(p.totalInventory)}</s-text>
+                          {selectedProducts[p.id] ? <s-text color="subdued"> </s-text> : null}
+                          {selectedProducts[p.id] && p.allVariants.length > 1 ? (
+                            <s-stack gap="small-200">
+                              <s-text color="subdued"> </s-text>
+                              {p.allVariants.map((v: VariantData) => (
+                                <s-text key={v.id} color="subdued">
+                                  {formatQty(v.inventoryQuantity)}
+                                </s-text>
+                              ))}
+                            </s-stack>
+                          ) : null}
+                        </s-stack>
                       </s-table-cell>
                     </s-table-row>
                   );
@@ -8035,8 +8490,11 @@ function Extension() {
     );
   }, [historyCombinedAll, historySearch]);
 
-  // Left 2/3 is History (automatic, read-only -- search is its only control); right 1/3 is Settings
-  // itself, blank for now per explicit direction, a future pass fills it in.
+  // Left 2/3 is History (automatic, read-only -- search is its only control); right 1/3 is Settings,
+  // pinned at its top with a "Syntax Guide" link (session 19) that opens the hard-coded
+  // SYNTAX_GUIDE_TEXT in a read-only modal, the same pattern the editor's own Preview modal already
+  // uses for read-only scrollable text. Below that, Settings itself is still blank -- a future pass
+  // fills it in.
   const renderSettingsView = () => (
     <s-page heading="Settings">
       <s-button slot="header-actions" icon="arrow-left" onClick={backToMain}>
@@ -8118,9 +8576,28 @@ function Extension() {
           </s-box>
         </s-section>
         <s-section heading="Settings" padding="none">
-          <s-box padding="base" />
+          <s-box padding="base">
+            <s-stack gap="base">
+              <s-clickable commandFor="syntax-guide-modal" command="--show">
+                <s-text type="strong">Syntax Guide</s-text>
+              </s-clickable>
+            </s-stack>
+          </s-box>
         </s-section>
       </s-grid>
+
+      <s-modal id="syntax-guide-modal" heading="Syntax Guide" size="large">
+        <s-text-area
+          label="Syntax guide"
+          labelAccessibilityVisibility="exclusive"
+          value={SYNTAX_GUIDE_TEXT}
+          rows={24}
+          readOnly
+        />
+        <s-button slot="primary-action" variant="primary" commandFor="syntax-guide-modal" command="--hide">
+          Close
+        </s-button>
+      </s-modal>
     </s-page>
   );
 
