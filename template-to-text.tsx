@@ -4735,7 +4735,7 @@ function formatGraphQLErrors(
 // list share the same product cache and note map) rather than being split into custom hooks.
 // ----------------------------------------------------------------------------------------------
 function Extension() {
-  const [view, setView] = useState<'main' | 'editor' | 'selection'>('main');
+  const [view, setView] = useState<'main' | 'editor' | 'selection' | 'settings'>('main');
   // The shop's own gid, used as the metafield ownerId on writes. Loaded on app start.
   const shopIdRef = useRef<string | null>(null);
   // The shop's primary domain host (e.g. "myshop.myshopify.com"), exposed via {{ primaryDomain }}.
@@ -5437,6 +5437,15 @@ function Extension() {
   // Toggle one variant of a selected product in/out of its checked subset. Unchecking the LAST
   // remaining checked variant is refused -- there would be nothing left to render for that product --
   // so at least one variant always stays selected.
+  //
+  // Ignores a change event that reports the state this specific variant is already in, the same
+  // guard toggleProduct's own checkbox already needs (see its comment above): s-checkbox can
+  // re-emit 'change' when its checked property is reapplied during a re-render triggered by some
+  // OTHER checkbox's click, not just on a genuine user click on THIS one. Without this guard, that
+  // echo would call this function again for a variant the merchant never touched -- previously
+  // harmless for the "check" branch (already had its own no-op check below) but not for "uncheck",
+  // which unconditionally re-filtered and wrote a new array every time. Reported symptom this fixes:
+  // clicking one variant's checkbox also toggling an unrelated one (e.g. always the 3rd of 5).
   const toggleVariantChecked = (
     productId: string,
     allVariantIds: string[],
@@ -5445,14 +5454,11 @@ function Extension() {
   ): void => {
     setSelectedVariantIds((prev: Record<string, string[]>) => {
       const current = prev[productId] && prev[productId].length > 0 ? prev[productId] : allVariantIds;
-      let next: string[];
-      if (checked) {
-        if (current.includes(variantId)) return prev;
-        next = [...current, variantId];
-      } else {
-        next = current.filter((id: string) => id !== variantId);
-        if (next.length === 0) return prev;
-      }
+      if (current.includes(variantId) === checked) return prev;
+      const next = checked
+        ? [...current, variantId]
+        : current.filter((id: string) => id !== variantId);
+      if (next.length === 0) return prev;
       return { ...prev, [productId]: next };
     });
   };
@@ -5596,6 +5602,12 @@ function Extension() {
   const backToMain = (): void => {
     setView('main');
     setEditorError(null);
+  };
+
+  // Settings page: currently blank (placeholder for future settings), reached from the gear
+  // button on the main page's header-actions row.
+  const openSettings = (): void => {
+    setView('settings');
   };
 
   // Whether the editor has unsaved changes compared to the values when it was opened.
@@ -7111,6 +7123,13 @@ function Extension() {
             Download Files
           </s-button>
         )}
+        {/* Last in this row, on purpose: header-actions reads left-to-right, and this is the one
+            action meant to land at the row's right edge, above the Templates column (the grid's
+            narrower 1fr column below) rather than clustered with the selection/download actions
+            above Products (2fr). */}
+        <s-button icon="settings" accessibilityLabel="Settings" onClick={openSettings}>
+          Settings
+        </s-button>
       </s-stack>
 
       {downloadProgress ? (
@@ -7330,6 +7349,8 @@ function Extension() {
                               {p.allVariants.map((v: VariantData) => (
                                 <s-checkbox
                                   key={v.id}
+                                  label={v.title}
+                                  details={`Qty: ${formatQty(v.inventoryQuantity)}`}
                                   accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
                                   checked={checkedVariantIds.includes(v.id)}
                                   onChange={(e: any) =>
@@ -7340,9 +7361,7 @@ function Extension() {
                                       e.currentTarget.checked,
                                     )
                                   }
-                                >
-                                  {v.title} · Qty: {formatQty(v.inventoryQuantity)}
-                                </s-checkbox>
+                                />
                               ))}
                             </s-stack>
                           ) : null}
@@ -7606,8 +7625,20 @@ function Extension() {
       </s-modal>
     </s-page>
   );
+
+  // Blank for now, per explicit direction -- just the page shell and the way back to the main
+  // view. Settings themselves are a future pass.
+  const renderSettingsView = () => (
+    <s-page heading="Settings">
+      <s-button slot="header-actions" icon="arrow-left" onClick={backToMain}>
+        Back
+      </s-button>
+    </s-page>
+  );
+
   if (view === 'editor') return renderEditorView();
   if (view === 'selection' && selectionSlot) return renderSelectionView();
+  if (view === 'settings') return renderSettingsView();
   return renderMainView();
 }
 
