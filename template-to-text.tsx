@@ -296,6 +296,62 @@ function isStandaloneNote(entry: SelectionEntry): boolean {
   return !entry.id.startsWith('gid://');
 }
 
+// --- Global variables (session 23) --------------------------------------------------------------
+// A shop-wide, merchant-defined variable, read-only inside a template: `title` is the name
+// referenced as `{{ $global:title }}` (see GLOBAL_PREFIX/spliceGlobalVariables further down), `body`
+// is the literal text/template snippet it evaluates to. Defined and managed on their own Settings
+// page (see renderGlobalVarsView), NOT inside any one template -- see roadmap.md item 22 for the
+// full design discussion this implements.
+interface GlobalVarEntry {
+  id: string;
+  title: string;
+  body: string;
+}
+
+// Generate a placeholder id for a new global variable entry -- same shape as generateNoteId, just a
+// distinct prefix so the two are never confused if they ever end up in the same debug log.
+function generateGlobalVarId(): string {
+  return `global-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Parse the stored global-variables metafield value into an ordered list. A missing, empty, or
+// unparseable value yields an empty list -- same defensive shape as parseSelectionItems.
+function parseGlobalVars(rawValue: any): GlobalVarEntry[] {
+  if (rawValue == null || rawValue === '') return [];
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) return [];
+    const list: GlobalVarEntry[] = [];
+    for (const item of parsed) {
+      if (item && typeof item.title === 'string') {
+        list.push({
+          id: typeof item.id === 'string' && item.id ? item.id : generateGlobalVarId(),
+          title: item.title,
+          body: typeof item.body === 'string' ? item.body : '',
+        });
+      }
+    }
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+// Single, un-sharded shop metafield (like a public selection's own metafield) holding every global
+// variable as one JSON array -- no template-style multi-shard packing needed, since global
+// definitions are merchant-authored, not auto-generated like History.
+const GLOBALS_KEY = 'globals';
+
+// Read-immediately-before-write query for globals, mirroring HISTORY_READ_QUERY's own narrower
+// single-metafield shape (used by mutateGlobalVars below) rather than re-fetching all 6 public
+// selections + subtitles + History just to change one global variable.
+const GLOBALS_READ_QUERY = `query ReadGlobals($ns: String!, $key: String!) {
+  shop {
+    id
+    globals: metafield(namespace: $ns, key: $key) { value }
+  }
+}`;
+
 // --- History (session 17) -------------------------------------------------------------------
 // An automatic, shop-wide log of activity: which objects a template has actually produced a
 // downloaded file from, and a handful of selection/template lifecycle events. Stored the same way
@@ -466,7 +522,7 @@ function selectionMetafieldKey(slot: SelectionSlotId): string | null {
   return `sel_public_${slot.slice(-1)}`;
 }
 
-const SELECTIONS_READ_QUERY = `query ReadSelections($ns: String!, $pub1: String!, $pub2: String!, $pub3: String!, $pub4: String!, $pub5: String!, $pub6: String!, $subs: String!, $hist: String!) {
+const SELECTIONS_READ_QUERY = `query ReadSelections($ns: String!, $pub1: String!, $pub2: String!, $pub3: String!, $pub4: String!, $pub5: String!, $pub6: String!, $subs: String!, $hist: String!, $globals: String!) {
   shop {
     id
     pub1: metafield(namespace: $ns, key: $pub1) { value }
@@ -477,6 +533,7 @@ const SELECTIONS_READ_QUERY = `query ReadSelections($ns: String!, $pub1: String!
     pub6: metafield(namespace: $ns, key: $pub6) { value }
     subs: metafield(namespace: $ns, key: $subs) { value }
     hist: metafield(namespace: $ns, key: $hist) { value }
+    globals: metafield(namespace: $ns, key: $globals) { value }
   }
 }`;
 
@@ -875,6 +932,14 @@ function formatQty(totalInventory: number | null): string {
   return totalInventory == null ? '—' : String(totalInventory);
 }
 
+// One-line preview of a global variable's value for the Global Vars list table (session 23):
+// collapses any internal whitespace/newlines to single spaces (so a multi-line value never breaks
+// the table row's height) and truncates with an ellipsis past 80 characters.
+function globalVarBodyPreview(body: string): string {
+  const collapsed = body.replace(/\s+/g, ' ').trim();
+  return collapsed.length > 80 ? `${collapsed.slice(0, 80)}…` : collapsed;
+}
+
 // Builds a link to a product's Shopify Admin edit page from its GraphQL gid
 // ("gid://shopify/Product/123...") and the shop's primary domain host (the same value exposed as
 // {{ primaryDomain }}), for the product-selection table's "click the title to open the product
@@ -1238,6 +1303,69 @@ function stripComments(body: string): string {
   return body.replace(COMMENT_REGEX, '');
 }
 
+// --- Global variables (session 23) --------------------------------------------------------------
+// `{{ $global:NAME }}` reads a shop-wide variable defined on its own Settings page (see
+// GlobalVarEntry/renderGlobalVarsView), never inside a template -- see roadmap.md item 22 for the
+// full design discussion. `:` is not in IDENTIFIER_REGEX/ASSIGNMENT_REGEX's excluded-character set,
+// so `$global:NAME` is already a syntactically ordinary identifier shape to the rest of this file;
+// no grammar change was needed to recognize it, only the splice/guard code below.
+const GLOBAL_PREFIX = '$global:';
+
+// Matches a BARE global-variable read -- the whole token is exactly `{{ $global:NAME }}`, nothing
+// else inside the braces. An assignment attempt (`{{ $global:NAME = VALUE }}`) has extra content
+// after NAME and deliberately does NOT match this, so it falls through untouched to
+// renderTokenContent's own assignment branch, which is where the read-only rejection is enforced
+// (see the guard added there) -- splicing only ever needs to handle the read direction.
+// A REAL regex literal (not a string concatenation): see IF_OPEN_SOURCE's own long comment further
+// down for exactly why a plain string of `\{\{\s*...` is NOT safe here (a JS string literal silently
+// drops the backslash before `\s`, turning it into a literal lowercase "s") -- this file was bitten
+// by that exact bug once already (session 6) and every tag pattern since has used a real regex.
+const GLOBAL_READ_REGEX = /\{\{\s*\$global:([^\s{}.=<>!&|,()]+)\s*\}\}/g;
+
+// Visible markers for the three ways a global-variable reference can go wrong, matching this file's
+// established "never fail silently" pattern (see unresolvedVariableMarker/deprecatedSyntaxMarker
+// above) -- deliberately contain no literal double-curly-brace characters, for the same reason those
+// two markers don't: this text can end up back inside a string fed through another render pass.
+function globalReadOnlyMarker(name: string): string {
+  return `[[ global variable "${name}" is read-only in a template -- change its value in Settings under Global Vars instead ]]`;
+}
+
+function globalUndefinedMarker(name: string): string {
+  return `[[ no global variable named "${name}" is defined -- add one in Settings under Global Vars ]]`;
+}
+
+function globalNotExpandedMarker(name: string): string {
+  return `[[ global variable "${name}" was not expanded here -- a global cannot reference another global yet ]]`;
+}
+
+// Textually splice every bare `{{ $global:NAME }}` reference in a template's OUTER body with that
+// global's own (already comment-stripped -- see globalBodiesByTitle's own comment) text, or a
+// visible marker when NAME isn't a defined global. Runs ONCE, right after the outer body's own
+// stripComments (so a global reference sitting inside a `{{ #comment }}` block is already gone by
+// the time this runs, and a global's own spliced-in text is never itself raw, un-stripped comment
+// markup) and BEFORE every other pass (`applyWhitespaceTokens` has already run; `flattenForeachInsideWhile`,
+// foreach expansion, and `renderTokens` all run AFTER) -- so a spliced-in global's body is evaluated
+// completely normally, in the same left-to-right document-order pass as everything else in the file.
+// This is what makes a global reference see the OUTER file's own local variables (e.g. `x`) at their
+// CURRENT value at that exact point in the file's own document order, per the clarifying example in
+// roadmap.md item 22 -- pre-evaluating a global once, up front, could not do that.
+//
+// `String.prototype.replace` with a global regex scans the ORIGINAL string in one pass; it does not
+// re-scan text just inserted by an earlier replacement. That is what enforces roadmap.md item 22's
+// "no global-to-global references" scope limit for free: if a global's own body itself contains
+// `{{ $global:other }}`, that text is spliced in here VERBATIM (never expanded), and is left for
+// resolveOnProduct's own fallback (see its "not expanded" check) to render as a visible marker
+// instead of silently resolving to '' once the normal token pipeline reaches it. It also means a
+// global that (accidentally or not) references itself can never recurse -- there is no cycle to
+// guard against.
+function spliceGlobalVariables(body: string, globalBodiesByTitle: Record<string, string>): string {
+  return body.replace(GLOBAL_READ_REGEX, (_match: string, name: string) =>
+    Object.prototype.hasOwnProperty.call(globalBodiesByTitle, name)
+      ? globalBodiesByTitle[name]
+      : globalUndefinedMarker(name),
+  );
+}
+
 // Whitespace tokens: `{{ /return }}` resolves to a real newline and `{{ /space }}` resolves to a
 // single space character. Both are leading/trailing whitespace agnostic between the braces. This
 // runs as the FIRST compiler pass so the resulting whitespace is present for every later pass and
@@ -1469,6 +1597,16 @@ function resolveOnProduct(product: ProductData, parts: string[], ctx: EvalContex
   if (parts.length === 1 && Object.prototype.hasOwnProperty.call(ctx.vars, parts[0])) {
     const stored = ctx.vars[parts[0]];
     return stored == null ? '' : stored;
+  }
+  // Global variables (session 23) safety net: a genuine `{{ $global:NAME }}` reference in the
+  // OUTER template body is already resolved by spliceGlobalVariables long before this ever runs (see
+  // its own comment) -- the only way a raw one can still reach here is from INSIDE another global's
+  // own spliced-in body (global-to-global references are deliberately not expanded, see
+  // spliceGlobalVariables' comment and roadmap.md item 22's scope limit), which would otherwise
+  // silently resolve to '' like any other unrecognized token. A visible marker instead makes that
+  // unsupported nesting visible rather than silently blank.
+  if (parts.length === 1 && parts[0].indexOf(GLOBAL_PREFIX) === 0) {
+    return globalNotExpandedMarker(parts[0].slice(GLOBAL_PREFIX.length));
   }
   // {{ mf.namespace }} / {{ mf.key }} / {{ mf.value }} (session 10): the metafield currently being
   // iterated by a {{ #metafields.foreach }} block -- see EvalContext.currentMetafield's comment.
@@ -1906,15 +2044,27 @@ function renderTokenContent(
   // existing template. Verified via real JS -- see replace_and_assignment_verify.js (scratchpad),
   // including a "before the fix" case confirming this reproduces the exact reported symptom.
   const assignmentMatch = trimmed.match(ASSIGNMENT_REGEX);
-  if (assignmentMatch && !RESERVED_ASSIGNMENT_NAMES.has(assignmentMatch[1].toLowerCase())) {
-    const value = renderTokens(
-      trimmed.slice(assignmentMatch[0].length),
-      product,
-      allProducts,
-      ctx,
-    ).trim();
-    ctx.vars[assignmentMatch[1]] = value;
-    return '';
+  if (assignmentMatch) {
+    // Global variables (session 23) are read-only in a template -- `$global:` is not in
+    // RESERVED_ASSIGNMENT_NAMES (see GLOBAL_PREFIX's own comment for why that's unnecessary), so
+    // without this check `{{ $global:foo = X }}` would otherwise silently succeed as an ordinary
+    // LOCAL variable assignment named "$global:foo" -- creating a local variable that happens to
+    // share a real global's exact spelling, with no error, and genuinely ambiguous meaning for any
+    // LATER bare `{{ $global:foo }}` in that same file. A visible marker instead, matching this
+    // file's established "never fail silently" pattern.
+    if (assignmentMatch[1].indexOf(GLOBAL_PREFIX) === 0) {
+      return globalReadOnlyMarker(assignmentMatch[1].slice(GLOBAL_PREFIX.length));
+    }
+    if (!RESERVED_ASSIGNMENT_NAMES.has(assignmentMatch[1].toLowerCase())) {
+      const value = renderTokens(
+        trimmed.slice(assignmentMatch[0].length),
+        product,
+        allProducts,
+        ctx,
+      ).trim();
+      ctx.vars[assignmentMatch[1]] = value;
+      return '';
+    }
   }
   // Boolean expression token, e.g. {{ TRUE != FALSE }} or {{ {{=({{x}}+{{i}})%4}} == 0 }}.
   if (hasBooleanOperator(trimmed)) {
@@ -4093,6 +4243,7 @@ function planCombined(
   selectionLength: number,
   primaryDomain: string,
   now: Date,
+  globalBodiesByTitle: Record<string, string>,
 ): {
   fileCount: number;
   render: (fileIndex: number | null) => string;
@@ -4105,7 +4256,11 @@ function planCombined(
 } {
   const rows = expandSelectionToRows(products);
   const first = rows[0];
-  const withoutComments = flattenForeachInsideWhile(stripComments(applyWhitespaceTokens(body)));
+  // Global variables (session 23) are spliced in right after stripComments, before every other pass
+  // -- see spliceGlobalVariables' own comment for why that ordering matters.
+  const withoutComments = flattenForeachInsideWhile(
+    spliceGlobalVariables(stripComments(applyWhitespaceTokens(body)), globalBodiesByTitle),
+  );
 
   // Session 9: the first selection-scope foreach's iterated item list, partitioned into groups by
   // the template's Merge IF condition -- replaces the old size-based i=0<N chunking (see
@@ -4550,6 +4705,7 @@ function planOutputFiles(
   mergeCondition: string,
   primaryDomain: string,
   now: Date,
+  globalBodiesByTitle: Record<string, string>,
 ): FilePlan {
   // Session 7, per explicit direction: a template whose fileBreak was never explicitly chosen (a
   // template saved before session 4, never opened and resaved since) is no longer guessed -- see
@@ -4592,6 +4748,7 @@ function planOutputFiles(
       selectionLength,
       primaryDomain,
       now,
+      globalBodiesByTitle,
     );
     if (combined.fileCount <= 1) {
       const name =
@@ -4620,8 +4777,11 @@ function planOutputFiles(
 
   // Every other mode renders one unit -- a variant row, a whole product, a note, or a mix of
   // products then notes -- through evaluateSingle against a shared preprocessed body (see
-  // evaluateSingle's comment for why that's computed once here rather than once per unit).
-  const preparedBody = flattenForeachInsideWhile(stripComments(applyWhitespaceTokens(templateBody)));
+  // evaluateSingle's comment for why that's computed once here rather than once per unit). Global
+  // variables (session 23) are spliced in here too, once, same as planCombined's own branch above.
+  const preparedBody = flattenForeachInsideWhile(
+    spliceGlobalVariables(stripComments(applyWhitespaceTokens(templateBody)), globalBodiesByTitle),
+  );
   let units: RenderUnit[];
   if (fileBreak === 'variant') {
     // One file per variant row -- the long-standing default behavior.
@@ -4734,6 +4894,7 @@ function buildOutputFiles(
   mergeCondition: string,
   primaryDomain: string,
   now: Date,
+  globalBodiesByTitle: Record<string, string>,
 ): OutputFiles {
   const plan = planOutputFiles(
     templateTitle,
@@ -4745,6 +4906,7 @@ function buildOutputFiles(
     mergeCondition,
     primaryDomain,
     now,
+    globalBodiesByTitle,
   );
   const files: ZipEntry[] = [];
   for (let index = 0; index < plan.count; index++) {
@@ -5295,6 +5457,27 @@ same vendor, only starting a new file when the vendor changes:
 Leave this blank for the ordinary one-file-per-object behavior described above.
 
 
+14. GLOBAL VARIABLES
+---------------------
+{{ $global:NAME }}
+
+A global variable is defined once, shop-wide, in Settings under "Global Vars" -- not inside any
+one template. Give it a Title (the NAME you'll reference) and a Value (the text/template snippet
+it should evaluate to), then reference it from any template with {{ $global:NAME }}. It's replaced
+with that global's own text right there, evaluated the same way the rest of your template is -- so
+a global's value can itself contain other tokens, loops, if-blocks, anything a template body can.
+
+Global variables are READ-ONLY inside a template: {{ $global:NAME = VALUE }} does nothing but show
+an error marker. Change a global's value on its own Settings page, not from inside a template.
+
+A global's own Value cannot reference another global (no global-to-global chaining, yet) -- doing
+so shows an error marker rather than expanding. A NAME that doesn't match any defined global also
+shows an error marker rather than silently rendering nothing, so a typo is easy to spot.
+
+Example: a global titled "signature" with value "Thanks for shopping with us!" -- referencing
+{{ $global:signature }} in any template outputs "Thanks for shopping with us!" wherever it's placed.
+
+
 QUICK REFERENCE
 -----------------
 {{ product.FIELD }}                     {{ variant.FIELD }}
@@ -5303,6 +5486,7 @@ QUICK REFERENCE
 {{ primaryDomain }}                     {{ /return }} {{ /space }}
 {{ x = VALUE }}  {{ x }}                {{ = EXPR }}
 {{ $x = VALUE }}  {{ $x }}              (collision-safe variable form)
+{{ $global:NAME }}                      (read-only, defined in Settings > Global Vars)
 {{ #if=COND }} ... {{ #else }} ... {{ /if }}
 {{ #variants.foreach v, l=0 }} ... {{/variants.foreach}}
 {{ #tags.foreach tag, i=0 }} ... {{/tags.foreach}}
@@ -5329,7 +5513,7 @@ QUICK REFERENCE
 // list share the same product cache and note map) rather than being split into custom hooks.
 // ----------------------------------------------------------------------------------------------
 function Extension() {
-  const [view, setView] = useState<'main' | 'editor' | 'selection' | 'settings'>('main');
+  const [view, setView] = useState<'main' | 'editor' | 'selection' | 'settings' | 'globals'>('main');
   // The shop's own gid, used as the metafield ownerId on writes. Loaded on app start.
   const shopIdRef = useRef<string | null>(null);
   // The shop's primary domain host (e.g. "myshop.myshopify.com"), exposed via {{ primaryDomain }}.
@@ -5449,6 +5633,19 @@ function Extension() {
   const [historyLoading, setHistoryLoading] = useState<boolean>(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historySearch, setHistorySearch] = useState<string>('');
+  // Global variables (session 23): the full, ordered list -- loaded alongside the 6 public
+  // selections/History (loadSelections/refreshAll), same "ready by the time its Settings sub-page
+  // opens" reasoning History's own entries already use. `globalVarSearch` filters the list view;
+  // `editingGlobalVarId` (null for "new") plus the two draft fields back the edit popup, mirroring
+  // the note-modal's own draft-then-Save/Discard shape.
+  const [globalVars, setGlobalVars] = useState<GlobalVarEntry[]>([]);
+  const [globalVarSearch, setGlobalVarSearch] = useState<string>('');
+  const [globalVarError, setGlobalVarError] = useState<string | null>(null);
+  const [editingGlobalVarId, setEditingGlobalVarId] = useState<string | null>(null);
+  const [globalVarTitleDraft, setGlobalVarTitleDraft] = useState<string>('');
+  const [globalVarBodyDraft, setGlobalVarBodyDraft] = useState<string>('');
+  const [globalVarTitleError, setGlobalVarTitleError] = useState<string | null>(null);
+  const [globalVarSaving, setGlobalVarSaving] = useState<boolean>(false);
   const [selectionSlot, setSelectionSlot] = useState<SelectionSlotId | null>(null);
   const [selectionDraft, setSelectionDraft] = useState<ProductData[]>([]);
   // The OPEN selection's own combined product+note order, by id -- seeded on openSelectionView from
@@ -5577,6 +5774,20 @@ function Extension() {
     () => templates.find((t) => t.id === selectedTemplateId) || null,
     [templates, selectedTemplateId],
   );
+
+  // Global variables (session 23): each global's OWN comment-stripped body, keyed by title -- what
+  // spliceGlobalVariables actually reads. Computed once here (not on every splice call) per
+  // spliceGlobalVariables' own comment; both the real download (the effect below) and the editor
+  // Preview (buildOutputFiles further down) read this SAME map, so Preview never drifts from what a
+  // download would actually produce -- the same guarantee this shared-planner pattern already
+  // protects for every other input (mergeCondition, primaryDomain, ...).
+  const globalBodiesByTitle = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const g of globalVars) {
+      map[g.title] = stripComments(g.body);
+    }
+    return map;
+  }, [globalVars]);
 
   // The products shown in the table. Combines the server-side page results with client-side matches:
   //  - No applied search term: just the server page results.
@@ -5765,6 +5976,49 @@ function Extension() {
     }
   };
 
+  // Global variables' own read-mutate-write flow (session 23), the same read-immediately-before-
+  // write shape as mutateTemplateList/mutateHistory above -- but, unlike History's best-effort/
+  // silently-swallowed model, a failure here IS surfaced via `setError`: editing a global variable is
+  // a deliberate merchant action (like editing a template), not bookkeeping alongside some other
+  // action, so it should fail loudly the same way mutateTemplateList already does. Returns the
+  // written list on success (mirroring mutateTemplateList's own return shape), or null once
+  // `setError` has already been called.
+  const mutateGlobalVars = async (
+    mutate: (current: GlobalVarEntry[]) => GlobalVarEntry[],
+    setError: (msg: string) => void,
+  ): Promise<GlobalVarEntry[] | null> => {
+    const ownerId = await ensureShopId(setError);
+    if (!ownerId) return null;
+    try {
+      const { data, errors: readErrors } = await shopify.query(GLOBALS_READ_QUERY, {
+        variables: { ns: TEMPLATE_NAMESPACE, key: GLOBALS_KEY },
+      });
+      if (readErrors?.length) {
+        setError(readErrors.map((e: any) => e.message).join(', '));
+        return null;
+      }
+      const current = parseGlobalVars(data?.shop?.globals?.value);
+      const next = mutate(current);
+      const { data: writeData, errors: writeErrors } = await shopify.query(TEMPLATES_WRITE_MUTATION, {
+        variables: {
+          metafields: [
+            { ownerId, namespace: TEMPLATE_NAMESPACE, key: GLOBALS_KEY, type: 'json', value: JSON.stringify(next) },
+          ],
+        },
+      });
+      const message = formatGraphQLErrors(writeErrors, writeData?.metafieldsSet?.userErrors);
+      if (message) {
+        setError(message);
+        return null;
+      }
+      setGlobalVars(next);
+      return next;
+    } catch (err: any) {
+      setError(err?.message || 'Failed to save global variables.');
+      return null;
+    }
+  };
+
   // --------------------------------------------------------------------------------------------
   // Data layer: product fetching & caching
   // --------------------------------------------------------------------------------------------
@@ -5892,6 +6146,7 @@ function Extension() {
           pub6: 'sel_public_6',
           subs: SUBTITLES_KEY,
           hist: HISTORY_KEY,
+          globals: GLOBALS_KEY,
         },
       });
       if (errors?.length) {
@@ -5938,6 +6193,7 @@ function Extension() {
       setSelectionSlotOrderIndex(slotOrderIndex as Record<PublicSelectionSlotId, Record<string, number>>);
       setSelectionSubtitles(parseSubtitles(shop?.subs?.value));
       setHistoryEntries(parseSelectionItems(shop?.hist?.value));
+      setGlobalVars(parseGlobalVars(shop?.globals?.value));
     } catch (err: any) {
       setSelectionsError(err?.message || 'Failed to load saved selections.');
     }
@@ -6281,6 +6537,124 @@ function Extension() {
     }
   };
 
+  // --------------------------------------------------------------------------------------------
+  // Handlers: global variables (session 23)
+  // Reached from Settings ("Global Vars" button, below the Syntax Guide link). Unlike the Selection
+  // view's own table, list-level actions (delete, reorder) commit immediately -- there is no
+  // separate list-level Save/draft concept here, matching the Templates list's own no-draft,
+  // immediate-commit model (delete-with-confirm, pin-toggle both write straight through). Only the
+  // per-entry EDIT POPUP has its own draft (title + body), saved/discarded independently, mirroring
+  // the "Add Blank Note" popup's own Save/Clear/Discard shape.
+  // --------------------------------------------------------------------------------------------
+  const openGlobalVarsPage = (): void => {
+    setView('globals');
+    setGlobalVarSearch('');
+    setGlobalVarError(null);
+  };
+
+  const backFromGlobalVars = (): void => {
+    setView('settings');
+  };
+
+  // Open the edit popup for an existing global (entry given) or a brand-new one (null).
+  const openGlobalVarModal = (entry: GlobalVarEntry | null): void => {
+    setEditingGlobalVarId(entry ? entry.id : null);
+    setGlobalVarTitleDraft(entry ? entry.title : '');
+    setGlobalVarBodyDraft(entry ? entry.body : '');
+    setGlobalVarTitleError(null);
+  };
+
+  // Clear both draft fields without closing the popup -- mirrors the note modal's own "Clear note".
+  const clearGlobalVarDraft = (): void => {
+    setGlobalVarTitleDraft('');
+    setGlobalVarBodyDraft('');
+    setGlobalVarTitleError(null);
+  };
+
+  const saveGlobalVarEntry = async (): Promise<void> => {
+    const title = globalVarTitleDraft.trim();
+    if (title === '') {
+      setGlobalVarTitleError('Title is required');
+      return;
+    }
+    // The title becomes the NAME half of `{{ $global:NAME }}` -- it must be a valid identifier
+    // shape (same character rule every other variable name in this file already follows -- see
+    // IDENTIFIER_REGEX's own comment for exactly which characters are structurally meaningful
+    // inside a token and therefore excluded) or the reference syntax itself would be broken/
+    // ambiguous.
+    if (!IDENTIFIER_REGEX.test(title)) {
+      setGlobalVarTitleError('Title can’t contain spaces or the characters { } . = < > ! & | , ( )');
+      return;
+    }
+    const duplicate = globalVars.some(
+      (g: GlobalVarEntry) => g.title === title && g.id !== editingGlobalVarId,
+    );
+    if (duplicate) {
+      setGlobalVarTitleError('A global variable with this title already exists');
+      return;
+    }
+    setGlobalVarTitleError(null);
+    setGlobalVarError(null);
+    setGlobalVarSaving(true);
+    try {
+      const savedId = editingGlobalVarId || generateGlobalVarId();
+      const body = globalVarBodyDraft;
+      await mutateGlobalVars((current: GlobalVarEntry[]) => {
+        const existingIndex = current.findIndex((g: GlobalVarEntry) => g.id === savedId);
+        const savedEntry: GlobalVarEntry = { id: savedId, title, body };
+        return existingIndex >= 0
+          ? current.map((g: GlobalVarEntry) => (g.id === savedId ? savedEntry : g))
+          : [...current, savedEntry];
+      }, setGlobalVarError);
+      setEditingGlobalVarId(null);
+      setGlobalVarTitleDraft('');
+      setGlobalVarBodyDraft('');
+    } finally {
+      setGlobalVarSaving(false);
+    }
+  };
+
+  const deleteGlobalVar = (id: string): void => {
+    setGlobalVarError(null);
+    mutateGlobalVars(
+      (current: GlobalVarEntry[]) => current.filter((g: GlobalVarEntry) => g.id !== id),
+      setGlobalVarError,
+    );
+  };
+
+  // Move one global variable up or down by a single position in the stored order -- a plain array
+  // reorder (unlike the Selection view's combined-rows order-index map, a global-variables list has
+  // only one kind of row, so there's nothing to interleave and no need for that extra indirection).
+  const moveGlobalVar = (id: string, offset: number): void => {
+    setGlobalVarError(null);
+    mutateGlobalVars((current: GlobalVarEntry[]) => {
+      const index = current.findIndex((g: GlobalVarEntry) => g.id === id);
+      const target = index + offset;
+      if (index === -1 || target < 0 || target >= current.length) {
+        return current;
+      }
+      const reordered = [...current];
+      const [moved] = reordered.splice(index, 1);
+      reordered.splice(target, 0, moved);
+      return reordered;
+    }, setGlobalVarError);
+  };
+
+  // The list the Global Vars page actually renders: filtered by title OR body against the search
+  // term, same case-insensitive substring rule every other search in this app already uses.
+  const globalVarsFiltered = useMemo<GlobalVarEntry[]>(() => {
+    const term = globalVarSearch.trim().toLowerCase();
+    if (term === '') return globalVars;
+    return globalVars.filter(
+      (g: GlobalVarEntry) => g.title.toLowerCase().includes(term) || g.body.toLowerCase().includes(term),
+    );
+  }, [globalVars, globalVarSearch]);
+
+  // Whether the edit popup, as currently opened, is for a NEW global variable (never opened via an
+  // existing entry) -- used only to pick the modal's heading. `s-modal`'s own `--show`/`--hide`
+  // commands drive actual visibility; `openGlobalVarModal` only decides which draft it shows.
+  const isNewGlobalVar = editingGlobalVarId === null;
+
   // Whether the editor has unsaved changes compared to the values when it was opened.
   const hasUnsavedChanges = (): boolean => {
     const orig = originalEditorRef.current;
@@ -6553,6 +6927,7 @@ function Extension() {
           tpl.mergeCondition,
           primaryDomain,
           new Date(),
+          globalBodiesByTitle,
         );
         setDownloadProgress({ done: 0, total: plan.count, packaging: false });
         const files: ZipEntry[] = [];
@@ -6627,7 +7002,7 @@ function Extension() {
       }
     };
     prepare();
-  }, [selectedTemplate, selectedProductList, noteObjects, primaryDomain]);
+  }, [selectedTemplate, selectedProductList, noteObjects, primaryDomain, globalBodiesByTitle]);
 
   // Whether the current selection is valid but the content could not be built.
   const downloadBuildFailed = canDownload && downloadFailed;
@@ -6667,6 +7042,7 @@ function Extension() {
         editorMergeCondition,
         primaryDomain,
         new Date(),
+        globalBodiesByTitle,
       );
       return { files: output.files, failed: false };
     } catch {
@@ -6681,6 +7057,7 @@ function Extension() {
     selectedProductList,
     noteObjects,
     primaryDomain,
+    globalBodiesByTitle,
   ]);
 
   // Clamp the page index so a changed selection can never point past the last generated file.
@@ -7376,6 +7753,18 @@ function Extension() {
                     {metafieldTokens.map((t) => (
                       <s-button key={t.token} onClick={() => insertVariable(t.token)}>
                         {t.label}
+                      </s-button>
+                    ))}
+                  </s-section>
+                ) : null}
+                {globalVars.length > 0 ? (
+                  <s-section heading="Global variables">
+                    {globalVars.map((g: GlobalVarEntry) => (
+                      <s-button
+                        key={g.id}
+                        onClick={() => insertVariable(`{{ $global:${g.title} }}`)}
+                      >
+                        {g.title}
                       </s-button>
                     ))}
                   </s-section>
@@ -8581,6 +8970,7 @@ function Extension() {
               <s-clickable commandFor="syntax-guide-modal" command="--show">
                 <s-text type="strong">Syntax Guide</s-text>
               </s-clickable>
+              <s-button onClick={openGlobalVarsPage}>Global Vars</s-button>
             </s-stack>
           </s-box>
         </s-section>
@@ -8601,9 +8991,182 @@ function Extension() {
     </s-page>
   );
 
+  // Global variables (session 23): a list page reached from Settings, modeled closely on the
+  // Selection view's own combined table (title/preview/reorder-arrows/remove-x columns) plus a
+  // search field, since that's the closest existing precedent for "one ordered list of named
+  // things, searchable, reorderable, removable." Clicking a body preview opens the edit popup
+  // (title + body draft, Save/Clear/Discard) -- the same three-button shape the "Add Blank Note"
+  // popup on the main page already uses.
+  const renderGlobalVarsView = () => (
+    <s-page heading="Global Vars">
+      <s-button slot="header-actions" icon="arrow-left" onClick={backFromGlobalVars}>
+        Back
+      </s-button>
+
+      {globalVarError ? (
+        <s-banner tone="critical" heading="Could not update global variables">
+          <s-text>{globalVarError}</s-text>
+        </s-banner>
+      ) : null}
+
+      <s-section padding="none">
+        <s-box padding="base">
+          <s-stack gap="base">
+            <s-stack direction="inline" gap="base" justifyContent="space-between" alignItems="center">
+              <s-heading>Global variables</s-heading>
+              <s-button
+                icon="plus"
+                accessibilityLabel="Add global variable"
+                commandFor="global-var-modal"
+                command="--show"
+                onClick={() => openGlobalVarModal(null)}
+              >
+                Add
+              </s-button>
+            </s-stack>
+            <s-search-field
+              label="Search global variables"
+              labelAccessibilityVisibility="exclusive"
+              placeholder="Search titles and values…"
+              value={globalVarSearch}
+              onInput={(e: any) => setGlobalVarSearch(e.currentTarget.value)}
+            />
+          </s-stack>
+        </s-box>
+
+        <s-table>
+          <s-table-header-row>
+            <s-table-header listSlot="primary">Title</s-table-header>
+            <s-table-header>Value</s-table-header>
+            <s-table-header>Order</s-table-header>
+            <s-table-header>Remove</s-table-header>
+          </s-table-header-row>
+          <s-table-body>
+            {globalVarsFiltered.length === 0 ? (
+              <s-table-row>
+                <s-table-cell>
+                  <s-text color="subdued">
+                    {globalVars.length === 0
+                      ? 'No global variables yet. Use Add to create one.'
+                      : 'No global variables found.'}
+                  </s-text>
+                </s-table-cell>
+                <s-table-cell />
+                <s-table-cell />
+                <s-table-cell />
+              </s-table-row>
+            ) : (
+              globalVarsFiltered.map((g: GlobalVarEntry) => {
+                const isFirst = globalVars[0]?.id === g.id;
+                const isLast = globalVars[globalVars.length - 1]?.id === g.id;
+                return (
+                  <s-table-row key={g.id}>
+                    <s-table-cell>
+                      <s-text type="strong">{g.title}</s-text>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-clickable
+                        inlineSize="100%"
+                        commandFor="global-var-modal"
+                        command="--show"
+                        onClick={() => openGlobalVarModal(g)}
+                      >
+                        <s-text color={g.body ? undefined : 'subdued'}>
+                          {g.body ? globalVarBodyPreview(g.body) : 'Click to add a value…'}
+                        </s-text>
+                      </s-clickable>
+                    </s-table-cell>
+                    <s-table-cell>
+                      {/* Reordering uses move controls, same reasoning as the Selection view's own
+                          rows: Polaris has no drag-and-drop component and the sandbox exposes no
+                          HTML5 drag events. Each move commits immediately (see moveGlobalVar). */}
+                      <s-stack direction="inline" gap="small-400" alignItems="center">
+                        <s-button
+                          icon="chevron-up"
+                          variant="tertiary"
+                          accessibilityLabel={`Move ${g.title} up`}
+                          disabled={globalVarSearch.trim() !== '' || isFirst}
+                          onClick={() => moveGlobalVar(g.id, -1)}
+                        />
+                        <s-button
+                          icon="chevron-down"
+                          variant="tertiary"
+                          accessibilityLabel={`Move ${g.title} down`}
+                          disabled={globalVarSearch.trim() !== '' || isLast}
+                          onClick={() => moveGlobalVar(g.id, 1)}
+                        />
+                      </s-stack>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <s-button
+                        icon="x"
+                        variant="tertiary"
+                        accessibilityLabel={`Delete ${g.title}`}
+                        onClick={() => deleteGlobalVar(g.id)}
+                      />
+                    </s-table-cell>
+                  </s-table-row>
+                );
+              })
+            )}
+          </s-table-body>
+        </s-table>
+      </s-section>
+
+      <s-modal id="global-var-modal" heading={isNewGlobalVar ? 'New global variable' : 'Edit global variable'}>
+        <s-stack gap="small">
+          <s-text-field
+            label="Title"
+            value={globalVarTitleDraft}
+            error={globalVarTitleError || undefined}
+            onInput={(e: any) => setGlobalVarTitleDraft(e.currentTarget.value)}
+          />
+          <s-text-area
+            label="Value"
+            value={globalVarBodyDraft}
+            rows={8}
+            placeholder="What {{ $global:TITLE }} should evaluate to…"
+            onInput={(e: any) => setGlobalVarBodyDraft(e.currentTarget.value)}
+          />
+          <s-text color="subdued">
+            Reference a global variable in any template with {'{{ $global:'}
+            {globalVarTitleDraft.trim() || 'TITLE'}
+            {' }}'}
+          </s-text>
+          {/* Lives in the modal BODY, not the secondary-actions footer slot, for the exact same
+              reason the note modal's own "Clear note" button does: that slot only accepts button
+              components with variant "secondary" or "auto" (per the s-modal reference), so a
+              third, lower-emphasis "tertiary" button placed there was an invalid child. */}
+          <s-button variant="tertiary" onClick={clearGlobalVarDraft}>
+            Clear
+          </s-button>
+        </s-stack>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          loading={globalVarSaving}
+          commandFor="global-var-modal"
+          command="--hide"
+          onClick={saveGlobalVarEntry}
+        >
+          Save
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          variant="secondary"
+          commandFor="global-var-modal"
+          command="--hide"
+        >
+          Discard
+        </s-button>
+      </s-modal>
+    </s-page>
+  );
+
   if (view === 'editor') return renderEditorView();
   if (view === 'selection' && selectionSlot) return renderSelectionView();
   if (view === 'settings') return renderSettingsView();
+  if (view === 'globals') return renderGlobalVarsView();
   return renderMainView();
 }
 
