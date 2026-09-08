@@ -737,6 +737,30 @@ function narrowToSelectedVariants(
   return { ...product, variants: narrowed };
 }
 
+// Session 24: total variant count across a (possibly unopened) public selection's stored product
+// entries, for the "(v/n)" count shown in the Selections menu (see formatSelectionCount). An entry's
+// own `variantIds` is authoritative when present (an explicit narrowed count, no product hydration
+// needed). Otherwise it means "every variant," so the count falls back to the product's cached full
+// variant list in `allLoadedProducts` (the same session-wide cache productMatchesQuery already
+// searches) -- best-effort only: a product this session has never loaded (never browsed/searched)
+// isn't in that cache yet, and its true variant count can't be known without fetching it, so it
+// counts as 1 rather than blocking the menu label on a network round trip.
+function selectionEntriesVariantCount(
+  entries: SelectionEntry[],
+  allLoadedProducts: Record<string, ProductData>,
+): number {
+  return entries.reduce((sum, entry) => {
+    if (entry.variantIds && entry.variantIds.length > 0) {
+      return sum + entry.variantIds.length;
+    }
+    const product = allLoadedProducts[entry.id];
+    if (product && product.allVariants && product.allVariants.length > 0) {
+      return sum + product.allVariants.length;
+    }
+    return sum + 1;
+  }, 0);
+}
+
 // Generate a stable id for a template from its title plus a time/random suffix. Used as the React
 // key and selection id, and to match templates within the stored JSON array. Never changes once set.
 function generateTemplateId(title: string): string {
@@ -938,6 +962,13 @@ function formatQty(totalInventory: number | null): string {
 function globalVarBodyPreview(body: string): string {
   const collapsed = body.replace(/\s+/g, ' ').trim();
   return collapsed.length > 80 ? `${collapsed.slice(0, 80)}…` : collapsed;
+}
+
+// Session 24, per explicit direction: a selection's displayed count is "(v/n)" -- v variants, n
+// notes -- rather than a plain product/object count. n=0 omits the note half entirely ("(v)"); any
+// n>0 always shows both halves, even when v=0 ("(0/n)"), so v=n=0 reads as "(0)".
+function formatSelectionCount(variantCount: number, noteCount: number): string {
+  return noteCount === 0 ? `(${variantCount})` : `(${variantCount}/${noteCount})`;
 }
 
 // Builds a link to a product's Shopify Admin edit page from its GraphQL gid
@@ -1720,10 +1751,10 @@ function resolveTokenExpr(
   const trimmed = expr.trim();
   const parts = trimmed.split('.');
   if (parts[0] === 'selection' && parts[1] === 'first') {
-    return resolveOnProduct(list[0], parts.slice(2), ctx);
+    return resolveSelectionNeighborField(list[0], parts.slice(2), ctx);
   }
   if (parts[0] === 'selection' && parts[1] === 'last') {
-    return resolveOnProduct(list[list.length - 1], parts.slice(2), ctx);
+    return resolveSelectionNeighborField(list[list.length - 1], parts.slice(2), ctx);
   }
   // Session 9: `{{ selection.curr/next/prev.type }}` and `{{ selection.curr/next/prev.product/
   // variant.FIELD }}` -- the current render's position in the overall output sequence (see
@@ -1737,9 +1768,24 @@ function resolveTokenExpr(
     if (parts[2] === 'type' && parts.length === 3) {
       return neighbor.kind;
     }
-    return resolveOnProduct(neighbor.row, parts.slice(2), ctx);
+    return resolveSelectionNeighborField(neighbor.row, parts.slice(2), ctx);
   }
   return resolveOnProduct(product, parts, ctx);
+}
+
+// Session 24: `{{ selection.first/last/curr/next/prev.note }}` -- reads that OBJECT's own note
+// directly, the same way `.type` already reads directly, with no `.product.`/`.variant.` infix
+// needed. Per explicit direction ("{{ OBJECT.note }} to work for any object type"): the referenced
+// object may be a real product, a single-variant row, or a free-standing note (noteToPseudoProduct
+// stores a note's text on the SAME `.note` field a product uses -- see its own comment), so reading
+// `row.note` directly here already covers all three uniformly. Every other field path is unaffected,
+// falling straight through to the existing resolveOnProduct dispatch (which still requires the
+// `.product.`/`.variant.` infix for everything besides `.note`).
+function resolveSelectionNeighborField(row: ProductData, parts: string[], ctx: EvalContext): string {
+  if (parts.length === 1 && parts[0] === 'note') {
+    return row.note || '';
+  }
+  return resolveOnProduct(row, parts, ctx);
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -5421,6 +5467,11 @@ This text is stripped out before the template runs. Use it for notes to yourself
 {{ selection.prev.type }}
 {{ selection.next.product.title }}         A field from the NEXT object in sequence
 {{ selection.prev.product.title }}         A field from the PREVIOUS object
+{{ selection.curr.note }}                  That object's own note, whatever kind of
+{{ selection.next.note }}                  object it is -- product, variant, or a
+{{ selection.prev.note }}                  free-standing note -- with no need for a
+{{ selection.first.note }}                 .product. or .variant. in between
+{{ selection.last.note }}
 
 selection.next / selection.prev resolve to nothing when there is no next/previous
 object (the first or last item). These are especially useful with Merge IF (section
@@ -5447,8 +5498,7 @@ product sheet per product, a single combined order sheet, etc.
 Below the File Break setting is a "Merge IF:" condition. Can be used to modify the file
 break behavior. If evaluates to TRUE, the next file's text will be appended to the
 current file's text. If Empty or FALSE, the files do not merge. Can use variables,
-functions, and other objects in the selection using commands and
-selection.curr/next/prev.product/variant.FIELD to reference neighboring objects.
+functions, and other objects in the selection using commands.
 
 Example -- keep appending products to the same file as long as the next one has the
 same vendor, only starting a new file when the vendor changes:
@@ -5770,9 +5820,24 @@ function Extension() {
       ),
     [selectedProducts, productNotes, selectedVariantIds],
   );
+  // Session 24: total variant count across the Current Selection's products -- `.variants` on each
+  // row is already narrowed to whichever subset is checked (see narrowToSelectedVariants above), so
+  // this is just a straight sum, no separate lookup into selectedVariantIds needed. Feeds the
+  // "(v/n)" count shown next to "Current Selection" (see formatSelectionCount).
+  const currentSelectionVariantCount = useMemo(
+    () => selectedProductList.reduce((sum: number, p: ProductData) => sum + p.variants.length, 0),
+    [selectedProductList],
+  );
   const selectedTemplate = useMemo(
     () => templates.find((t) => t.id === selectedTemplateId) || null,
     [templates, selectedTemplateId],
+  );
+  // Session 24: the template the delete-confirmation modal is about to delete, if any -- looked up
+  // once here so both the modal's confirmation text (shows its title) and confirmDelete's own
+  // history-log text can share the same lookup instead of each re-deriving it.
+  const pendingDeleteTemplate = useMemo(
+    () => templates.find((t: TemplateData) => t.id === pendingDeleteId) || null,
+    [templates, pendingDeleteId],
   );
 
   // Global variables (session 23): each global's OWN comment-stripped body, keyed by title -- what
@@ -6434,6 +6499,10 @@ function Extension() {
     setSelectedProducts({});
     setProductNotes({});
     setSelectedVariantIds({});
+    // Session 24, per explicit direction: "Clear Product Selection" also clears the Current
+    // Selection's free-standing notes -- previously left untouched, so a note typed on the home
+    // page would silently survive a clear and still get bundled into the next download.
+    setNoteObjects([]);
     // No need to touch currentSelectionOrderIndex: it's only ever consulted for ids that are
     // actually present in selectedProducts/noteObjects (the real source of truth for what's
     // selected), so a now-cleared product's leftover entry there is inert, not stale-and-wrong.
@@ -6796,6 +6865,12 @@ function Extension() {
       }
       if (selectedTemplateId === pendingDeleteId) {
         setSelectedTemplateId(null);
+      }
+      // Session 24: deleting from the NEW editor-header delete button (as opposed to the template
+      // list's own menu action) means the template just deleted is the one currently open here --
+      // nothing left to edit, so return to the main view the same way Back does.
+      if (view === 'editor' && editingTemplate?.id === pendingDeleteId) {
+        backToMain();
       }
       setPendingDeleteId(null);
       setDeleteError(null);
@@ -7328,15 +7403,18 @@ function Extension() {
   // Label shown for a public selection in the Selections menu. A menu `s-button` renders a single
   // plain-text label with no color or style props, so when a slot has a subtitle the subtitle
   // REPLACES the default name, rendered through `toItalic` so it appears italic, and is followed by
-  // the slot's product count: "<italic subtitle> (N)". Only ever called for a public slot (see the
-  // PUBLIC_SLOTS.map call site below) -- "Current Selection" has its own literal label in the menu.
+  // the slot's "(v/n)" count (session 24 -- see formatSelectionCount/selectionEntriesVariantCount):
+  // "<italic subtitle> (v/n)". Only ever called for a public slot (see the PUBLIC_SLOTS.map call
+  // site below) -- "Current Selection" has its own literal label in the menu.
   const selectionMenuLabel = (slot: PublicSelectionSlotId): string => {
-    const count = (selectionEntries[slot] || []).length + (selectionNotes[slot] || []).length;
+    const variantCount = selectionEntriesVariantCount(selectionEntries[slot] || [], allLoadedProducts);
+    const noteCount = (selectionNotes[slot] || []).length;
+    const countLabel = formatSelectionCount(variantCount, noteCount);
     const subtitle = selectionSubtitleFor(slot);
     if (subtitle) {
-      return `${toItalic(subtitle)} (${count})`;
+      return `${toItalic(subtitle)} ${countLabel}`;
     }
-    return `${selectionSlotLabel(slot)} (${count})`;
+    return `${selectionSlotLabel(slot)} ${countLabel}`;
   };
 
   // Move ONE row (product OR note) up or down by a single position in the open selection's combined
@@ -7666,15 +7744,35 @@ function Extension() {
   // --------------------------------------------------------------------------------------------
   const renderEditorView = () => (
       <s-page heading={editingTemplate ? 'Edit template' : 'New template'}>
-        {hasUnsavedChanges() ? (
-          <s-button slot="header-actions" icon="arrow-left" commandFor="leave-confirm-modal">
-            Back
-          </s-button>
-        ) : (
-          <s-button slot="header-actions" icon="arrow-left" onClick={backToMain}>
-            Back
-          </s-button>
-        )}
+        <s-stack slot="header-actions" direction="inline" gap="base" justifyContent="space-between">
+          <s-stack direction="inline" gap="base">
+            {hasUnsavedChanges() ? (
+              <s-button icon="arrow-left" commandFor="leave-confirm-modal">
+                Back
+              </s-button>
+            ) : (
+              <s-button icon="arrow-left" onClick={backToMain}>
+                Back
+              </s-button>
+            )}
+          </s-stack>
+          {/* Session 24, per explicit direction: a delete button inside the editor itself, top
+              right (same row as Back), red, reusing the exact same delete-template-modal the
+              template list's own "Delete template" menu action already opens -- confirmDelete
+              below returns to the main view afterward when the deleted template is the one open
+              here. Only shown for an already-saved template -- a brand-new, unsaved one has
+              nothing to delete yet. */}
+          {editingTemplate ? (
+            <s-button
+              icon="delete"
+              tone="critical"
+              commandFor="delete-template-modal"
+              onClick={() => openDeleteModal(editingTemplate.id)}
+            >
+              Delete template
+            </s-button>
+          ) : null}
+        </s-stack>
 
         {editorError ? (
           <s-banner tone="critical" heading="Could not save template">
@@ -7875,7 +7973,7 @@ function Extension() {
             <s-text-field
               label="Merge IF:"
               value={editorMergeCondition}
-              details="Can be used to modify the file break behavior.  If evaluates to TRUE, the next file's text will be appended to the current file's text. If Empty or FALSE, the files do not merge. Can use variables, functions, and other objects in the selection using commands and selection.curr/next/prev.product/variant.FIELD to reference neighboring objects."
+              details="Can be used to modify the file break behavior.  If evaluates to TRUE, the next file's text will be appended to the current file's text. If Empty or FALSE, the files do not merge. Can use variables, functions, and other objects in the selection using commands."
               onInput={(e: any) => setEditorMergeCondition(e.currentTarget.value)}
             />
 
@@ -8345,7 +8443,9 @@ function Extension() {
               >
                 <s-heading>Products</s-heading>
                 <s-stack direction="inline" gap="small" alignItems="center">
-                  <s-text color="subdued">{selectedProductList.length} selected</s-text>
+                  <s-text color="subdued">
+                    {formatSelectionCount(currentSelectionVariantCount, noteObjects.length)} selected
+                  </s-text>
                   <s-button icon="caret-down" commandFor="selections-menu">
                     Selections
                   </s-button>
@@ -8354,7 +8454,7 @@ function Extension() {
                   <s-menu id="selections-menu" accessibilityLabel="Product selections">
                     <s-section heading="Current">
                       <s-button onClick={() => openSelectionView('current')}>
-                        Current Selection ({selectedProductList.length})
+                        Current Selection {formatSelectionCount(currentSelectionVariantCount, noteObjects.length)}
                       </s-button>
                     </s-section>
                     <s-section heading="Public">
@@ -8811,7 +8911,10 @@ function Extension() {
               <s-text>{deleteError}</s-text>
             </s-banner>
           ) : null}
-          <s-text>This template will be permanently removed and cannot be recovered.</s-text>
+          <s-text>
+            "{pendingDeleteTemplate?.title || 'Untitled'}" will be permanently removed and cannot be
+            recovered.
+          </s-text>
         </s-stack>
         <s-button
           slot="primary-action"
@@ -8937,7 +9040,13 @@ function Extension() {
                                   alt={row.product.title}
                                 />
                               ) : null}
-                              <s-text type="strong">{row.product.title}</s-text>
+                              {adminProductUrl(row.product.id, primaryDomain) ? (
+                                <s-link href={adminProductUrl(row.product.id, primaryDomain)!} target="_blank">
+                                  <s-text type="strong">{row.product.title}</s-text>
+                                </s-link>
+                              ) : (
+                                <s-text type="strong">{row.product.title}</s-text>
+                              )}
                             </s-stack>
                           ) : (
                             <s-text type="strong">📝 Note</s-text>
@@ -8967,9 +9076,9 @@ function Extension() {
         <s-section heading="Settings" padding="none">
           <s-box padding="base">
             <s-stack gap="base">
-              <s-clickable commandFor="syntax-guide-modal" command="--show">
-                <s-text type="strong">Syntax Guide</s-text>
-              </s-clickable>
+              <s-button commandFor="syntax-guide-modal" command="--show">
+                Syntax Guide
+              </s-button>
               <s-button onClick={openGlobalVarsPage}>Global Vars</s-button>
             </s-stack>
           </s-box>
