@@ -1334,6 +1334,44 @@ function stripComments(body: string): string {
   return body.replace(COMMENT_REGEX, '');
 }
 
+// Session 26: whether a template body references ANY per-object data -- a product/variant field, a
+// note (including the direct `selection.curr/next/prev/first/last.note` form -- session 24), or a
+// foreach loop that steps through variants/tags/metafields/notes/the selection. Used to decide
+// whether a 'selection'-fileBreak template may be downloaded/previewed with an EMPTY selection (see
+// canDownload/canPreview) -- fileBreak alone is not a sufficient check: several of these tokens
+// (selection.first/last/curr especially) don't just render blank against zero objects the way an
+// ordinary `{{ product.FIELD }}` token already does when used INSIDE a real per-object render --
+// they throw outright, because with zero products `first`/`rows[0]` is `undefined`, and
+// resolveSelectionNeighborField/resolveOnProduct dereference a field directly off whatever row
+// they're handed, with no "missing row" fallback (unlike the ordinary product/variant dispatch,
+// which is only ever reached against a REAL object in every other code path).
+// A plain substring scan over the (comment-stripped) body, deliberately simple rather than a full
+// token-aware parse: it can't tell a real `{{ }}` token from the same words in ordinary prose (a
+// sentence ending "...our product." would also match), so a false POSITIVE is possible. That costs
+// the merchant nothing beyond needing to select at least one product -- the exact behavior every
+// template already had before this session -- so erring conservative here is the safe direction.
+const SELECTION_OBJECT_REFERENCE_MARKERS = [
+  'product.',
+  'products.',
+  'variant.',
+  'variants.',
+  'mf.',
+  'notes.foreach',
+  'selection.foreach',
+  'tags.foreach',
+  'metafields.foreach',
+  'selection.first',
+  'selection.last',
+  'selection.curr',
+  'selection.next',
+  'selection.prev',
+];
+
+function templateNeedsSelectionObjects(body: string): boolean {
+  const stripped = stripComments(body);
+  return SELECTION_OBJECT_REFERENCE_MARKERS.some((marker) => stripped.includes(marker));
+}
+
 // --- Global variables (session 23) --------------------------------------------------------------
 // `{{ $global:NAME }}` reads a shop-wide variable defined on its own Settings page (see
 // GlobalVarEntry/renderGlobalVarsView), never inside a template -- see roadmap.md item 22 for the
@@ -7009,18 +7047,21 @@ function Extension() {
   // Download preparation
   // --------------------------------------------------------------------------------------------
   // Session 26, per explicit direction ("if a template has no variables, then a template can be
-  // downloaded without products in the selection"): 'selection' fileBreak is the one mode where the
-  // whole template renders as a single (or Merge-IF-grouped) document, not one file per selected
-  // object -- planCombined already renders correctly with an empty products/notes list (the same
-  // code path a notes-only selection with zero products already exercises today; any `{{ product.*
-  // }}`/`{{ variant.* }}` token left in the body just resolves to '' the same way an inapplicable
-  // field already does). The four per-unit modes ('variant'/'product'/'note'/'object') still need at
-  // least one object regardless -- there is nothing to loop over otherwise, so they're left requiring
-  // a non-empty selection.
+  // downloaded without products in the selection" -- refined to also require the body not
+  // reference any per-object data, and to require 'selection' fileBreak regardless of that check).
+  // 'selection' fileBreak is the one mode where the whole template renders as a single (or
+  // Merge-IF-grouped) document, not one file per selected object -- but fileBreak alone is not a
+  // sufficient check: see templateNeedsSelectionObjects' own comment for exactly why an empty
+  // selection can outright THROW for some of these tokens (selection.first/last/curr especially),
+  // not just render blank. Only a 'selection'-mode template whose body needs no per-object data at
+  // all is offered this relaxation; the four per-unit modes ('variant'/'product'/'note'/'object')
+  // are unaffected either way -- there is nothing to loop over with zero objects regardless of what
+  // the body contains, so they still require a non-empty selection.
+  const emptySelectionDownloadable =
+    selectedTemplate?.fileBreak === 'selection' &&
+    !templateNeedsSelectionObjects(selectedTemplate.body);
   const canDownload =
-    (selectedProductList.length > 0 ||
-      noteObjects.length > 0 ||
-      selectedTemplate?.fileBreak === 'selection') &&
+    (selectedProductList.length > 0 || noteObjects.length > 0 || emptySelectionDownloadable) &&
     selectedTemplate !== null;
 
   // Reactively compute the download href + filename from the current selection so a single click on
@@ -7035,9 +7076,7 @@ function Extension() {
     setDownloadFailed(false);
     if (
       !selectedTemplate ||
-      (selectedProductList.length === 0 &&
-        noteObjects.length === 0 &&
-        selectedTemplate.fileBreak !== 'selection')
+      (selectedProductList.length === 0 && noteObjects.length === 0 && !emptySelectionDownloadable)
     ) {
       setDownloadProgress(null);
       return;
@@ -7156,14 +7195,18 @@ function Extension() {
   // --------------------------------------------------------------------------------------------
   // Preview: build the same file set the download would produce, but from the CURRENT (possibly
   // unsaved) editor values, so a template can be checked before it is saved.
+  // Session 26: same "'selection' mode, body needs no per-object data" relaxation as
+  // emptySelectionDownloadable above, but against the EDITOR's own live fileBreak/body (not
+  // yet-saved) since this is the in-editor preview -- see templateNeedsSelectionObjects' own
+  // comment for why the body check matters, not just fileBreak.
+  const previewEmptySelectionDownloadable =
+    editorFileBreak === 'selection' && !templateNeedsSelectionObjects(editorBody);
+
   const preview = useMemo<{ files: ZipEntry[]; failed: boolean }>(() => {
-    // Session 26: same "'selection' mode needs no objects" relaxation as canDownload above, but
-    // against the EDITOR's own live fileBreak setting (not yet-saved) since this is the in-editor
-    // preview.
     if (
       selectedProductList.length === 0 &&
       noteObjects.length === 0 &&
-      editorFileBreak !== 'selection'
+      !previewEmptySelectionDownloadable
     ) {
       return { files: [], failed: false };
     }
@@ -7200,7 +7243,7 @@ function Extension() {
   const previewPage =
     preview.files.length === 0 ? 0 : Math.min(previewIndex, preview.files.length - 1);
   const canPreview =
-    selectedProductList.length > 0 || noteObjects.length > 0 || editorFileBreak === 'selection';
+    selectedProductList.length > 0 || noteObjects.length > 0 || previewEmptySelectionDownloadable;
 
   const openPreview = (): void => {
     setPreviewIndex(0);
