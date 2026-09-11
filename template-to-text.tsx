@@ -7897,6 +7897,16 @@ function Extension() {
           </s-banner>
         ) : null}
 
+        {/* Session 27 bugfix (see delete-template-modal below): the modal's own confirm button now
+            closes it immediately on click, so a failed delete's error can no longer be shown INSIDE
+            the (already-closed) modal -- it surfaces here instead, on the page behind it, the same
+            way editorError already does. */}
+        {deleteError ? (
+          <s-banner tone="critical" heading="Could not delete template">
+            <s-text>{deleteError}</s-text>
+          </s-banner>
+        ) : null}
+
         <s-section>
           <s-stack gap="base">
             <s-text-field
@@ -8227,24 +8237,35 @@ function Extension() {
             component state, not view-local) also lives here, mirroring the pattern
             leave-confirm-modal above and selection-leave-modal (renderSelectionView) already
             use. Only one view is ever mounted at a time, so having the same id declared in two
-            views' JSX never creates two real DOM nodes at once. */}
+            views' JSX never creates two real DOM nodes at once.
+            Session 27 bugfix: the confirm button below used to have no `commandFor`/`command`
+            of its own (deliberately, it looks like -- so a failed delete's error banner, then
+            rendered INSIDE this modal, would stay visible instead of disappearing with it). But
+            `s-modal` open/closed state is NOT tied to any Preact prop this file controls --
+            `pendingDeleteId` going back to null on success does not itself close an
+            already-open modal, only an explicit `--hide` command does. Reported directly: after
+            a successful delete, the popup stayed open, now asking to delete "Untitled" (
+            `pendingDeleteTemplate` correctly went null once the template left `templates`, but
+            the modal itself never got told to close). Fix: `command="--hide"` added to the
+            confirm button below, matching every other confirm-and-act button in this file (the
+            note modal's Save, both leave-confirm modals' Save Changes, the global-var modal's
+            Save) -- all of which close immediately on click, success or failure, and rely on a
+            PAGE-level banner (not one inside the now-closed modal) to surface a failure. The
+            in-modal error banner that used to live here is gone for the same reason; see the
+            new page-level `deleteError` banner above (editor) / in the Templates section below
+            (main view). */}
         <s-modal id="delete-template-modal" heading="Delete template?">
-          <s-stack gap="base">
-            {deleteError ? (
-              <s-banner tone="critical" heading="Could not delete template">
-                <s-text>{deleteError}</s-text>
-              </s-banner>
-            ) : null}
-            <s-text>
-              "{pendingDeleteTemplate?.title || 'Untitled'}" will be permanently removed and cannot
-              be recovered.
-            </s-text>
-          </s-stack>
+          <s-text>
+            "{pendingDeleteTemplate?.title || 'Untitled'}" will be permanently removed and cannot be
+            recovered.
+          </s-text>
           <s-button
             slot="primary-action"
             variant="primary"
             tone="critical"
             loading={deleting}
+            commandFor="delete-template-modal"
+            command="--hide"
             onClick={confirmDelete}
           >
             Delete template
@@ -8934,6 +8955,17 @@ function Extension() {
             </s-box>
           ) : null}
 
+          {/* Session 27 bugfix (see delete-template-modal's own comment): its confirm button now
+              closes the modal immediately on click, so a failed delete's error surfaces here, on
+              the page behind it, instead of inside the (already-closed) modal. */}
+          {deleteError ? (
+            <s-box padding="base">
+              <s-banner tone="critical" heading="Could not delete template">
+                <s-text>{deleteError}</s-text>
+              </s-banner>
+            </s-box>
+          ) : null}
+
           <s-box padding="base">
             <s-stack gap="none">
               {templatesLoading ? (
@@ -9070,23 +9102,23 @@ function Extension() {
         </s-button>
       </s-modal>
 
+      {/* Session 27 bugfix: this modal's confirm button now closes it immediately on click (see
+          its own comment in renderEditorView's copy of this same modal for the full story) --
+          a failed delete's error now surfaces via the page-level deleteError banner above
+          (Templates section) instead of an in-modal banner that would close along with everything
+          else here. */}
       <s-modal id="delete-template-modal" heading="Delete template?">
-        <s-stack gap="base">
-          {deleteError ? (
-            <s-banner tone="critical" heading="Could not delete template">
-              <s-text>{deleteError}</s-text>
-            </s-banner>
-          ) : null}
-          <s-text>
-            "{pendingDeleteTemplate?.title || 'Untitled'}" will be permanently removed and cannot be
-            recovered.
-          </s-text>
-        </s-stack>
+        <s-text>
+          "{pendingDeleteTemplate?.title || 'Untitled'}" will be permanently removed and cannot be
+          recovered.
+        </s-text>
         <s-button
           slot="primary-action"
           variant="primary"
           tone="critical"
           loading={deleting}
+          commandFor="delete-template-modal"
+          command="--hide"
           onClick={confirmDelete}
         >
           Delete template
