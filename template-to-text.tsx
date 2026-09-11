@@ -6197,7 +6197,19 @@ function Extension() {
   };
 
   // Read all six shared saved selections. Every key is fixed, so no user identity is needed.
-  const loadSelections = async (): Promise<void> => {
+  //
+  // Session 26: also RETURNS what it just parsed (not just the state setters it already calls) --
+  // needed by openSelectionView (see its own comment), which awaits this and then needs the fresh
+  // slot data immediately, in the SAME tick. Reading selectionEntries/selectionNotes/etc. from
+  // component state right after `await`ing this would still see the PRE-refresh values: a state
+  // setter schedules a re-render, it doesn't mutate the closure the awaiting function already
+  // captured. Returns null on any error, matching the existing setSelectionsError-and-bail shape.
+  const loadSelections = async (): Promise<{
+    productEntries: Record<PublicSelectionSlotId, SelectionEntry[]>;
+    noteEntries: Record<PublicSelectionSlotId, SelectionEntry[]>;
+    slotOrderIndex: Record<PublicSelectionSlotId, Record<string, number>>;
+    subtitles: Record<string, string>;
+  } | null> => {
     setSelectionsError(null);
     try {
       const { data, errors } = await shopify.query(SELECTIONS_READ_QUERY, {
@@ -6216,7 +6228,7 @@ function Extension() {
       });
       if (errors?.length) {
         setSelectionsError(errors.map((e: any) => e.message).join(', '));
-        return;
+        return null;
       }
       const shop = data?.shop;
       if (shop?.id) {
@@ -6253,14 +6265,25 @@ function Extension() {
         });
         slotOrderIndex[slot] = orderIndex;
       }
-      setSelectionEntries(productEntries);
-      setSelectionNotes(noteEntries);
-      setSelectionSlotOrderIndex(slotOrderIndex as Record<PublicSelectionSlotId, Record<string, number>>);
-      setSelectionSubtitles(parseSubtitles(shop?.subs?.value));
+      const typedProductEntries = productEntries as Record<PublicSelectionSlotId, SelectionEntry[]>;
+      const typedNoteEntries = noteEntries as Record<PublicSelectionSlotId, SelectionEntry[]>;
+      const typedSlotOrderIndex = slotOrderIndex as Record<PublicSelectionSlotId, Record<string, number>>;
+      const subtitles = parseSubtitles(shop?.subs?.value);
+      setSelectionEntries(typedProductEntries);
+      setSelectionNotes(typedNoteEntries);
+      setSelectionSlotOrderIndex(typedSlotOrderIndex);
+      setSelectionSubtitles(subtitles);
       setHistoryEntries(parseSelectionItems(shop?.hist?.value));
       setGlobalVars(parseGlobalVars(shop?.globals?.value));
+      return {
+        productEntries: typedProductEntries,
+        noteEntries: typedNoteEntries,
+        slotOrderIndex: typedSlotOrderIndex,
+        subtitles,
+      };
     } catch (err: any) {
       setSelectionsError(err?.message || 'Failed to load saved selections.');
+      return null;
     }
   };
 
@@ -6569,9 +6592,22 @@ function Extension() {
     });
   };
 
+  // Session 26, per explicit direction ("exiting a menu should refresh the templates and
+  // products"): re-reads the template list and the current page of the product browser on the way
+  // back out of a sub-page, so edits made elsewhere while it was open (a template saved from another
+  // staff login, a product's title/price changed) aren't left stale until the next full "Refresh
+  // Page" click. Deliberately NOT awaited by its callers below -- the back navigation itself happens
+  // immediately; this fills in once it resolves, the same way `fetchTemplates`/`fetchProducts`
+  // already re-render on completion everywhere else they're called.
+  const refreshTemplatesAndProducts = (): void => {
+    fetchTemplates();
+    fetchProducts(null, 'forward', appliedSearch);
+  };
+
   const backToMain = (): void => {
     setView('main');
     setEditorError(null);
+    refreshTemplatesAndProducts();
   };
 
   // Settings page: reached from the gear button on the main page's header-actions row. The right
@@ -6623,6 +6659,7 @@ function Extension() {
 
   const backFromGlobalVars = (): void => {
     setView('settings');
+    refreshTemplatesAndProducts();
   };
 
   // Open the edit popup for an existing global (entry given) or a brand-new one (null).
@@ -6971,8 +7008,20 @@ function Extension() {
   // --------------------------------------------------------------------------------------------
   // Download preparation
   // --------------------------------------------------------------------------------------------
+  // Session 26, per explicit direction ("if a template has no variables, then a template can be
+  // downloaded without products in the selection"): 'selection' fileBreak is the one mode where the
+  // whole template renders as a single (or Merge-IF-grouped) document, not one file per selected
+  // object -- planCombined already renders correctly with an empty products/notes list (the same
+  // code path a notes-only selection with zero products already exercises today; any `{{ product.*
+  // }}`/`{{ variant.* }}` token left in the body just resolves to '' the same way an inapplicable
+  // field already does). The four per-unit modes ('variant'/'product'/'note'/'object') still need at
+  // least one object regardless -- there is nothing to loop over otherwise, so they're left requiring
+  // a non-empty selection.
   const canDownload =
-    (selectedProductList.length > 0 || noteObjects.length > 0) && selectedTemplate !== null;
+    (selectedProductList.length > 0 ||
+      noteObjects.length > 0 ||
+      selectedTemplate?.fileBreak === 'selection') &&
+    selectedTemplate !== null;
 
   // Reactively compute the download href + filename from the current selection so a single click on
   // the download link downloads the file(s) directly (browser-native), with no separate generate step.
@@ -6984,7 +7033,12 @@ function Extension() {
     downloadBuildRef.current = buildId;
     setDownload(null);
     setDownloadFailed(false);
-    if (!selectedTemplate || (selectedProductList.length === 0 && noteObjects.length === 0)) {
+    if (
+      !selectedTemplate ||
+      (selectedProductList.length === 0 &&
+        noteObjects.length === 0 &&
+        selectedTemplate.fileBreak !== 'selection')
+    ) {
       setDownloadProgress(null);
       return;
     }
@@ -7103,7 +7157,14 @@ function Extension() {
   // Preview: build the same file set the download would produce, but from the CURRENT (possibly
   // unsaved) editor values, so a template can be checked before it is saved.
   const preview = useMemo<{ files: ZipEntry[]; failed: boolean }>(() => {
-    if (selectedProductList.length === 0 && noteObjects.length === 0) {
+    // Session 26: same "'selection' mode needs no objects" relaxation as canDownload above, but
+    // against the EDITOR's own live fileBreak setting (not yet-saved) since this is the in-editor
+    // preview.
+    if (
+      selectedProductList.length === 0 &&
+      noteObjects.length === 0 &&
+      editorFileBreak !== 'selection'
+    ) {
       return { files: [], failed: false };
     }
     try {
@@ -7138,7 +7199,8 @@ function Extension() {
   // Clamp the page index so a changed selection can never point past the last generated file.
   const previewPage =
     preview.files.length === 0 ? 0 : Math.min(previewIndex, preview.files.length - 1);
-  const canPreview = selectedProductList.length > 0 || noteObjects.length > 0;
+  const canPreview =
+    selectedProductList.length > 0 || noteObjects.length > 0 || editorFileBreak === 'selection';
 
   const openPreview = (): void => {
     setPreviewIndex(0);
@@ -7216,15 +7278,25 @@ function Extension() {
       setSubtitleBaseline('');
       return;
     }
-    const storedEntries = selectionEntries[slot] || [];
-    const storedNotes = selectionNotes[slot] || [];
-    setSelectionNoteDraft(storedNotes);
-    setSelectionViewOrderIndex(selectionSlotOrderIndex[slot] || {});
-    const storedSubtitle = selectionSubtitles[slot] || '';
-    setSubtitleDraft(storedSubtitle);
-    setSubtitleBaseline(storedSubtitle);
     setSelectionLoading(true);
     try {
+      // Session 26, per explicit direction ("opening a selection should refresh it" /
+      // "refresh doesn't work in a selection"): re-read the selection metafields fresh every time a
+      // public slot is opened, instead of trusting whatever selectionEntries/selectionNotes already
+      // held in memory -- otherwise a change saved from another browser tab or staff login (or just
+      // this session's own stale copy) stayed invisible until the next full "Refresh Page" click.
+      // loadSelections returns what it just parsed for exactly this reason (see its own comment) --
+      // reading selectionEntries[slot] etc. right after awaiting it would still see the PRE-refresh
+      // state. Falls back to the existing (stale) state only if the re-read itself failed, so a
+      // transient network error still shows *something* rather than an empty page.
+      const fresh = await loadSelections();
+      const storedEntries = fresh ? fresh.productEntries[slot] || [] : selectionEntries[slot] || [];
+      const storedNotes = fresh ? fresh.noteEntries[slot] || [] : selectionNotes[slot] || [];
+      setSelectionNoteDraft(storedNotes);
+      setSelectionViewOrderIndex(fresh ? fresh.slotOrderIndex[slot] || {} : selectionSlotOrderIndex[slot] || {});
+      const storedSubtitle = fresh ? fresh.subtitles[slot] || '' : selectionSubtitles[slot] || '';
+      setSubtitleDraft(storedSubtitle);
+      setSubtitleBaseline(storedSubtitle);
       const { products, missing, error } = await loadProductsByIds(storedEntries.map((e) => e.id));
       if (error) {
         setSelectionError(error);
@@ -7256,10 +7328,11 @@ function Extension() {
   };
 
   // Refresh button on the selection editor page: re-reads this same slot the same way opening it
-  // fresh from the Selections menu would (live app state for "current," a re-fetch from the
-  // stored metafield for a public slot) -- so it also discards any not-yet-saved edits in the
-  // draft, same as reloading any other page would. selectionLoading (already set by
-  // openSelectionView for public slots) doubles as this button's own loading/disabled state.
+  // fresh from the Selections menu would (live app state for "current," a genuine re-fetch of the
+  // stored metafield -- via loadSelections, session 26 -- for a public slot) -- so it also discards
+  // any not-yet-saved edits in the draft, same as reloading any other page would. selectionLoading
+  // (already set by openSelectionView for public slots) doubles as this button's own loading/
+  // disabled state.
   const refreshSelectionView = (): void => {
     if (selectionSlot) {
       openSelectionView(selectionSlot);
@@ -7703,6 +7776,7 @@ function Extension() {
     setView('main');
     setSelectionSlot(null);
     setSelectionError(null);
+    refreshTemplatesAndProducts();
   };
 
   // Used by the "Unsaved changes" popup's Save Changes button: save the draft, then leave the
@@ -8265,7 +8339,13 @@ function Extension() {
                             {row.product.imageUrl ? (
                               <s-thumbnail size="small" src={row.product.imageUrl} alt={row.product.title} />
                             ) : null}
-                            <s-text type="strong">{row.product.title}</s-text>
+                            {adminProductUrl(row.product.id, primaryDomain) ? (
+                              <s-link href={adminProductUrl(row.product.id, primaryDomain)!} target="_blank">
+                                <s-text type="strong">{row.product.title}</s-text>
+                              </s-link>
+                            ) : (
+                              <s-text type="strong">{row.product.title}</s-text>
+                            )}
                           </s-stack>
                         ) : (
                           <s-text type="strong">📝 Note</s-text>
