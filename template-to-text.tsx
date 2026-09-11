@@ -8216,6 +8216,49 @@ function Extension() {
             Stay
           </s-button>
         </s-modal>
+
+        {/* Session 26 bugfix: the editor's own delete-template button (see its header-actions
+            comment above) pointed `commandFor` at "delete-template-modal", but that modal only
+            existed in renderMainView's returned tree -- each top-level view renders its OWN
+            separate `<s-page>`, so a modal declared in one view's JSX simply does not exist in
+            another view's DOM at all. `commandFor` had nothing to show, so clicking Delete
+            template here silently did nothing. Fix: this exact copy of the same modal (same id,
+            same handlers -- confirmDelete/cancelDelete/pendingDeleteTemplate are shared
+            component state, not view-local) also lives here, mirroring the pattern
+            leave-confirm-modal above and selection-leave-modal (renderSelectionView) already
+            use. Only one view is ever mounted at a time, so having the same id declared in two
+            views' JSX never creates two real DOM nodes at once. */}
+        <s-modal id="delete-template-modal" heading="Delete template?">
+          <s-stack gap="base">
+            {deleteError ? (
+              <s-banner tone="critical" heading="Could not delete template">
+                <s-text>{deleteError}</s-text>
+              </s-banner>
+            ) : null}
+            <s-text>
+              "{pendingDeleteTemplate?.title || 'Untitled'}" will be permanently removed and cannot
+              be recovered.
+            </s-text>
+          </s-stack>
+          <s-button
+            slot="primary-action"
+            variant="primary"
+            tone="critical"
+            loading={deleting}
+            onClick={confirmDelete}
+          >
+            Delete template
+          </s-button>
+          <s-button
+            slot="secondary-actions"
+            variant="secondary"
+            commandFor="delete-template-modal"
+            command="--hide"
+            onClick={cancelDelete}
+          >
+            Cancel
+          </s-button>
+        </s-modal>
       </s-page>
     );
 
