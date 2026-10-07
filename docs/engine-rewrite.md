@@ -98,6 +98,8 @@ Each is pinned in both directions in `tests/engine/differential.test.ts` ("inten
 
 ## Not done (and why)
 
+* **Block tools directly inside conditions/equations** (e.g. `{{ #if={{ #length }}..{{/length}}<100 }}`) still render as
+  literal text, as in the old engine. Owner-accepted: assign to a variable first (documented in the in-app guide).
 * **UI fixes** (row click, double click, table overflow): unchanged in `src/ui/`; they need verification in a Shopify
   dev store. The designs are in `known-issues.md`.
 * **Concurrent-save protection** (`compareDigest`): dropped per the owner's decision.

@@ -27,3 +27,9 @@ guide (and its in-app copy in `src/ui/syntax-guide.tsx`) is what is wrong, not t
   `[[ deprecated syntax removed -- ... ]]` marker instead.
 * Inside a loop, `{{ break }}`/`{{ skip }}` discard the **whole** iteration's output (text before the tag too), not just
   what follows it.
+* **Block tools inside a condition, equation or boolean token are not evaluated** (they stay literal text, so
+  `{{ #if={{ #length }}{{ product.handle }}{{/length}}<100 }}` is always FALSE). Same on the old engine. The supported
+  pattern is to assign to a variable first: `{{ n = {{ #length }}...{{/length}} }}{{ #if={{ n }}<100 }}`. Documented in
+  the in-app guide (§6); pinned by `tests/engine/reported-issues.test.ts`. Lifting the limitation means parsing blocks in
+  inline context (`parse.ts`), a contained change if it is ever wanted.
+

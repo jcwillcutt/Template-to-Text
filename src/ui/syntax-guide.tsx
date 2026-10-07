@@ -154,12 +154,18 @@ in the editor's Insert menu to insert one.
 -----------------------
 {{ TRUE != FALSE }}   ->  TRUE
 {{ 3 > 2 }}            ->  TRUE
-{{ product.vendor == Acme Co }}
+{{ {{ product.vendor }} == Acme Co }}
 {{ {{x}} >= 10 && {{y}} < 5 }}
 
 Operators: == != < > <= >= && || !   Group with parentheses: {{ (A || B) && C }}
 A condition with no comparison at all is just checked for "truthy" (non-empty,
 non-zero, and not literally FALSE or 0).
+
+Inside a condition (or an equation), a field or variable must be wrapped in its own
+{{ }}. Block tools such as {{ #length }}...{{/length}} are NOT run inside a condition:
+assign the result to a variable first, then test the variable.
+  {{ n = {{ #length }}{{ product.handle }}{{/length}} }}
+  {{ #if={{ n }} < 100 }}short{{ /if }}
 
 
 7. IF / ELSE

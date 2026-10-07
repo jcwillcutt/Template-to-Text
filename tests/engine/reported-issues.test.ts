@@ -65,3 +65,24 @@ describe('conditions built from variables and equations (the reported bug)', () 
     expect(legacy('{{ x = 5 }}{{ #if={{ = {{x}} * 2 }} == 10 }}Y{{ #else }}N{{ /if }}')).toBe('N');
   });
 });
+
+// Known limitation (accepted by the owner): block tools are not evaluated INSIDE a condition, equation or
+// boolean token -- they stay literal text there. The supported pattern is to assign the block to a variable
+// first and test the variable. Pinned here so a future change is deliberate.
+describe('block tools inside conditions: assign to a variable first', () => {
+  const p = [makeProduct(1)]; // handle "product-1" (9 characters)
+  it('works through a variable', () => {
+    expect(render('{{ n = {{ #length }}{{ product.handle }}{{/length}} }}[{{ n }}]{{ #if={{ n }} < 100 }}T{{ #else }}F{{ /if }}', { products: p })).toBe('[9]T');
+    expect(render('{{ n = {{ #length }}{{ product.handle }}{{/length}} }}{{ #if={{ n }} > 100 }}T{{ #else }}F{{ /if }}', { products: p })).toBe('F');
+    expect(render('{{ n = {{ #length }}{{ product.handle }}{{/length}} }}{{ = {{ n }} * 2 }}', { products: p })).toBe('18');
+    expect(render('{{ s = {{ #replace=product, replacement=item }}{{ product.handle }}{{/replace}} }}{{ #if={{ s }} == item-1 }}T{{ #else }}F{{ /if }}', { products: p })).toBe('T');
+  });
+  it('a block written directly inside a condition is NOT run (it stays text, so the comparison is FALSE)', () => {
+    expect(render('{{ #if={{ #length }}{{ product.handle }}{{/length}}<100 }}T{{ #else }}F{{ /if }}', { products: p })).toBe('F');
+    expect(render('{{ {{ #length }}{{ product.handle }}{{/length}}<100 }}', { products: p })).toBe('FALSE');
+  });
+  it('the old engine behaves the same way for the direct form', () => {
+    const legacy = (t: string) => runLegacy(t, { products: p, fileBreak: 'selection' }).contents[0];
+    expect(legacy('{{ #if={{ #length }}{{ product.handle }}{{/length}}<100 }}T{{ #else }}F{{ /if }}')).toBe('F');
+  });
+});
