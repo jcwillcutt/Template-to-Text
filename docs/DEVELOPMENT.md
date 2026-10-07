@@ -12,6 +12,11 @@ npm run build       # writes dist/template-to-text.tsx  <- the single file to de
 npm run bench       # old vs. new engine timings (add `-- legacy` for only the old one)
 ```
 
+`dist/template-to-text.tsx` has **all comments and blank lines removed** (comments stay in `src/`), so its line numbers
+are as small as possible; compiler errors from the host refer to that stripped file. Comments are found as syntax-tree
+trivia, never by text matching, so strings, template literals (e.g. the syntax guide) and JSX text are untouched;
+`tests/build/bundle.test.ts` proves the stripped file has the same syntax tree as the commented build.
+
 ## Layout
 
 ```
