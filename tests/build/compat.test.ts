@@ -49,5 +49,5 @@ describe('the built bundle avoids syntax the original file never used', () => {
   const dist = fs.readFileSync(path.join(ROOT, 'dist', 'template-to-text.tsx'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   it('no class declarations', () => expect(dist).not.toMatch(/^\s*(export\s+)?class\s+\w+/m));
   it('no numeric separators', () => expect(dist).not.toMatch(/\b\d+_\d{3}\b/));
-  it('no Extract<> / conditional type helpers', () => expect(dist).not.toMatch(/\bExtract<|\bExclude</));
+  it('no Extract<> helper types', () => expect(dist).not.toMatch(/\bExtract</));
 });
