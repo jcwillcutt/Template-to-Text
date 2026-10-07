@@ -7,6 +7,22 @@ What I could and couldn't verify: I ran the template engine headlessly in Node (
 
 ---
 
+> ## Status update (after owner feedback)
+>
+> | Item | Status |
+> |---|---|
+> | S1 scaffolding, S2 old files | **Done, with a change:** old root files are untouched (per owner); new `package.json`, `tsconfig`, `vitest`, `scripts/`, `src/`, `tests/`, `docs/` sit beside them. |
+> | S3 engine module + tests | **Done**: `src/engine/*` (pure), 400+ tests, differential suite vs the legacy engine. See `testing.md`. |
+> | S4 split `Extension()` | Open. UI is split from the old file by section into `src/ui/` (still one big component). |
+> | S5-S8 | S5 partly (comments moved into the new docs); S6/S7 open; S8 open (syntax guide still in two places: see `syntax-guide-audit.md`). |
+> | C1 `#if` fix | **Done** in the new engine (not as a patch to the old file). |
+> | C2 AST engine, C3 one boolean grammar, C8 swallowed errors, C9 guards | **Done** (`engine-rewrite.md`). C4 typed variables, C6 `#elseif`, C7 structured diagnostics: open. |
+> | D1 compare-digest concurrent saves | **Dropped** (owner: edge case). |
+> | U1-U3 UI fixes | Open; designs in `known-issues.md`. They need a Shopify dev store to verify. |
+> | Single-file constraint | **Handled**: modules in `src/`, `npm run build` -> `dist/template-to-text.tsx` (committed, kept fresh by a test). |
+> | Liquid | Evaluated in `engine-rewrite.md`: not now; a Liquid front-end onto the same AST is the low-risk route. |
+
+
 ## 0. Orientation: what the app is
 
 - One file, `template-to-text.tsx` (9.6k lines, 450 KB): Admin UI extension in Preact using Polaris `s-*` web components.

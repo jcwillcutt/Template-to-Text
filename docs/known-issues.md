@@ -122,3 +122,14 @@ Follow-ups once the patch is in: delete the now-unused `applyIfBlocks` (`:3518`)
 ## Terminology note on storage ("unstructured metaobjects")
 
 Metaobjects always require a **definition** (a schema), so a metaobject can't be "unstructured". The *unstructured* storage primitive in Shopify is a **metafield without a definition**, and that is what the app already does: templates are JSON in up to 10 shop-owned metafields `template_to_text.template_0..9` (`:156-169`, written at `:6068-6082`), selections and globals likewise. This is consistent with the requirement that all staff can read templates regardless of metaobject permissions, so **don't migrate templates to metaobjects**. See `docs/suggestions.md` §3 for storage hardening.
+
+---
+
+## Status update
+
+* **#4 (`#if` with variables/equations): fixed in the new engine** (`src/engine/`, shipped via `dist/template-to-text.tsx`).
+  Reproduction, tests and the cause are in `tests/engine/reported-issues.test.ts` and `docs/engine-rewrite.md`.
+  The old patch (`docs/patches/lazy-if-evaluation.patch`) is kept for reference; it targets the legacy file, which is
+  untouched.
+* **#1-#3 (table overflow, row click, double click): not yet implemented.** They change the Polaris layout in
+  `src/ui/Extension.tsx` and need checking against a live Shopify admin; the designs above stand.
