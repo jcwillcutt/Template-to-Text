@@ -4,7 +4,7 @@ import { compileTemplate, parseCond, parseFull, parseInline } from '../../src/en
 import type { Node } from '../../src/engine/ast';
 import { renderAll } from '../helpers/render';
 import { makeProduct, makeProducts, makeNote } from '../helpers/fixtures';
-import { TemplateLimitError } from '../../src/engine/evaluate';
+import { isTemplateLimitError } from '../../src/engine/evaluate';
 
 const kinds = (nodes: Node[]): string[] => nodes.map((n) => n.k);
 const full = (t: string) => parseFull(t).root;
@@ -172,7 +172,7 @@ describe('totality (property tests)', () => {
         try {
           renderAll(t, { products, notes, fileBreak: fb as any, globals: { g: 'G' } });
         } catch (e) {
-          if (!(e instanceof TemplateLimitError)) throw e;
+          if (!isTemplateLimitError(e)) throw e;
         }
       }),
       { numRuns: 3000 },

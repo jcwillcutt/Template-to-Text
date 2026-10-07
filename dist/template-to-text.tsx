@@ -3503,20 +3503,23 @@ const signalOf = (ctx: Ctx): number => ctx.ctl;
 // Resource guards. The extension runs on the merchant's browser tab with no way to cancel a render, so a
 // runaway template (nested while loops, a huge repeat) must fail with a clear error instead of freezing or
 // crashing the page. The limits are far beyond any real document.
-const MAX_STEPS = 3_000_000;
-const MAX_REPEAT_OUTPUT = 50_000_000;
+const MAX_STEPS = 3000000;
+const MAX_REPEAT_OUTPUT = 50000000;
 
-class TemplateLimitError extends Error {
-  constructor(what: string) {
-    super(
-      `This template is too large or loops too long to run (${what}). Check your loop conditions and repeat counts.`,
-    );
-    this.name = 'TemplateLimitError';
-  }
+// A plain Error tagged by name (no `class`: the original code base uses none, and some restricted compilers
+// reject newer syntax). Test with isTemplateLimitError.
+function templateLimitError(what: string): Error {
+  const err = new Error(
+    `This template is too large or loops too long to run (${what}). Check your loop conditions and repeat counts.`,
+  );
+  err.name = 'TemplateLimitError';
+  return err;
 }
 
+const isTemplateLimitError = (e: unknown): boolean => e instanceof Error && e.name === 'TemplateLimitError';
+
 const tick = (ctx: Ctx): void => {
-  if (++ctx.steps > MAX_STEPS) throw new TemplateLimitError('more than ' + MAX_STEPS.toLocaleString('en-US') + ' loop steps');
+  if (++ctx.steps > MAX_STEPS) throw templateLimitError('more than ' + String(MAX_STEPS) + ' loop steps');
 };
 
 const MARKER_SNIPPET = 'unresolved variable "';
@@ -3780,7 +3783,7 @@ function runSeq(nodes: Node[], from: number, ctx: Ctx, sc: Scope, numeric: boole
       case 'repeat': {
         const count = evalNumber(node.count.length ? node.count : null, ctx, sc);
         const body = evalNodes(node.body, 0, ctx, sc, false);
-        if (count != null && count * (body.length + node.delineator.length) > MAX_REPEAT_OUTPUT) throw new TemplateLimitError('repeat count ' + count);
+        if (count != null && count * (body.length + node.delineator.length) > MAX_REPEAT_OUTPUT) throw templateLimitError('repeat count ' + count);
         lv.out += applyRepeat(body, count, node.delineator);
         break;
       }
@@ -3863,7 +3866,7 @@ function evalMath(expr: Node[], ctx: Ctx, sc: Scope, numeric: boolean): string {
 // Loops. All of them share one protocol: `ctx.ctl` is cleared before each iteration; if the iteration
 // raised {{ skip }} or {{ break }} its whole output is discarded, and break also ends the loop. The
 // signal is local to the iteration (the previous value is restored afterwards).
-function evalWhile(node: Extract<Node, { k: 'while' }>, ctx: Ctx, sc: Scope): string {
+function evalWhile(node: WhileNode, ctx: Ctx, sc: Scope): string {
   if (node.deprecated) {
     return deprecatedSyntaxMarker(
       'the old while form with a tag-bound counter (condition, comma, counter assignment) is ' +
@@ -3886,7 +3889,7 @@ function evalWhile(node: Extract<Node, { k: 'while' }>, ctx: Ctx, sc: Scope): st
   return out;
 }
 
-function evalVariants(node: Extract<Node, { k: 'variants' }>, ctx: Ctx, sc: Scope): string {
+function evalVariants(node: VariantLoopNode, ctx: Ctx, sc: Scope): string {
   const start = counterStart(node.start, ctx, sc);
   const prefix = node.deprecatedTied
     ? deprecatedSyntaxMarker(
@@ -3915,7 +3918,7 @@ function evalVariants(node: Extract<Node, { k: 'variants' }>, ctx: Ctx, sc: Scop
   return out;
 }
 
-function evalTags(node: Extract<Node, { k: 'tags' }>, ctx: Ctx, sc: Scope): string {
+function evalTags(node: TagsLoopNode, ctx: Ctx, sc: Scope): string {
   const start = counterStart(node.start, ctx, sc);
   const tags = sc.row.tags || [];
   const saved = ctx.ctl;
@@ -3934,7 +3937,7 @@ function evalTags(node: Extract<Node, { k: 'tags' }>, ctx: Ctx, sc: Scope): stri
   return out;
 }
 
-function evalMetafields(node: Extract<Node, { k: 'metafields' }>, ctx: Ctx, sc: Scope): string {
+function evalMetafields(node: MetafieldsLoopNode, ctx: Ctx, sc: Scope): string {
   const start = counterStart(node.start, ctx, sc);
   const metafields = sc.row.metafields || [];
   const savedMetafield = ctx.currentMetafield;

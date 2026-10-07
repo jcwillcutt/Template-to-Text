@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderAll } from '../helpers/render';
 import { makeProduct, makeProducts } from '../helpers/fixtures';
-import { MAX_STEPS, TemplateLimitError } from '../../src/engine/evaluate';
+import { MAX_STEPS, isTemplateLimitError } from '../../src/engine/evaluate';
 
 // The extension runs inside the merchant's browser tab and cannot cancel a render, so runaway templates
 // must fail fast with a clear error instead of freezing or crashing the page.
@@ -9,14 +9,14 @@ describe('resource guards', () => {
   const one = { products: [makeProduct(1)] };
   it('nested while loops that would run billions of steps fail with a clear error', () => {
     const t = '{{ a = 0 }}{{ #while=1==1 }}{{ b = 0 }}{{ #while=1==1 }}{{ b = {{ = {{b}}+1 }} }}{{/while}}{{/while}}';
-    expect(() => renderAll(t, one)).toThrow(TemplateLimitError);
+    expect(() => renderAll(t, one)).toThrow(/too large or loops too long/);
     expect(() => renderAll(t, one)).toThrow(/too large or loops too long/);
   });
   it('a single while loop stops at its own 10,000-step cap without error', () => {
     expect(renderAll('{{ n = 0 }}{{ #while=1==1 }}{{ n = {{ = {{n}}+1 }} }}{{/while}}{{ n }}', one).contents[0]).toBe('10000');
   });
   it('an enormous repeat is refused instead of exhausting memory', () => {
-    expect(() => renderAll('{{ #repeat=900000000 }}abcdefghij{{/repeat}}', one)).toThrow(TemplateLimitError);
+    expect(() => renderAll('{{ #repeat=900000000 }}abcdefghij{{/repeat}}', one)).toThrow(/too large or loops too long/);
   });
   it('a long chop walk counts against the budget', () => {
     expect(MAX_STEPS).toBeGreaterThan(1_000_000);
