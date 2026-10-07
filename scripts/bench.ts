@@ -15,7 +15,7 @@ if (only !== 'legacy') {
 }
 
 const LINE = `{{ product.title }},{{ product.handle }},{{ product.vendor }},{{ product.priceMin }},{{ product.metafield.custom.material }}`;
-const scenarios: { name: string; body: string; n: number; variants: number; fileBreak: string; merge?: string; runs?: number }[] = [
+const scenarios: { name: string; body: string; n: number; variants: number; fileBreak: string; merge?: string; runs?: number; expectDiff?: string }[] = [
   { name: 'combined CSV, 4000 products (foreach + if + math)', n: 4000, variants: 1, fileBreak: 'selection',
     body: `title,handle\n{{#selection.foreach product, i=0}}{{ #if={{ = {{ i }}%4 }} == 0 }}{{ /return }}{{ #else }},{{ /if }}${LINE}{{/selection.foreach}}` },
   { name: 'combined, 1000 products x 3 variants, nested variant loop', n: 1000, variants: 3, fileBreak: 'selection',
@@ -24,7 +24,7 @@ const scenarios: { name: string; body: string; n: number; variants: number; file
     body: `SKU: {{ variant.sku }}{{ /return }}Title: {{ product.title }} - {{ variant.title }}{{ /return }}{{ #if={{ variant.inventoryQuantity }} > 5 }}In stock{{ #else }}Low{{ /if }}` },
   { name: 'per-product files, 1000 products, 40-line template', n: 1000, variants: 1, fileBreak: 'product',
     body: Array.from({ length: 40 }, (_, k) => `L${k}: {{ product.title }} {{ product.handle }} {{ product.metafield.productspecs.serial }} {{ = {{ product.totalInventory }} * ${k + 1} }}`).join('{{ /return }}') },
-  { name: 'while loop, 5000 iterations', n: 1, variants: 1, fileBreak: 'selection',
+  { name: 'while loop, 5000 iterations', n: 1, variants: 1, fileBreak: 'selection', expectDiff: 'legacy evaluates the #if with a stale counter (the fixed bug), so its output is wrong',
     body: `{{ x = 0 }}{{ s = }}{{ #while={{x}}<5000 }}{{ #if={{ = {{x}}%1000 }} == 0 }}[{{x}}]{{ /if }}{{ x = {{ ={{x}}+1 }} }}{{/while}}` },
   { name: 'merge-IF grouping, 1500 products (group by vendor)', n: 1500, variants: 1, fileBreak: 'product', merge: `{{ selection.next.product.vendor }} == {{ selection.curr.product.vendor }}`,
     body: `{{ product.title }}{{ /return }}`, runs: 3 },
@@ -59,7 +59,7 @@ for (const sc of scenarios) {
       heapPeak = Math.max(heapPeak, process.memoryUsage().heapUsed - h0);
       out = `${plan.count} files, ${total} chars`;
       if (r === 0 && name === 'legacy') ref = first;
-      if (r === 0 && name !== 'legacy' && ref !== null && first !== ref) flag = ' (!! first file differs from legacy)';
+      if (r === 0 && name !== 'legacy' && ref !== null && first !== ref) flag = sc.expectDiff ? ` (differs by design: ${sc.expectDiff})` : ' (!! first file differs from legacy)';
     }
     row.push(`${name.padEnd(6)} ${med(times).toFixed(1).padStart(9)} ms  heap+${(heapPeak / 1048576).toFixed(0).padStart(4)} MB  [${out}]${flag}`);
   }

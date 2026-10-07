@@ -33,6 +33,25 @@ export const MAX_WHILE_ITERATIONS = 10000;
 // Reads the loop signal through a call so TypeScript doesn't narrow it to the 0 we just assigned.
 const signalOf = (ctx: Ctx): number => ctx.ctl;
 
+// Resource guards. The extension runs on the merchant's browser tab with no way to cancel a render, so a
+// runaway template (nested while loops, a huge repeat) must fail with a clear error instead of freezing or
+// crashing the page. The limits are far beyond any real document.
+export const MAX_STEPS = 3_000_000;
+export const MAX_REPEAT_OUTPUT = 50_000_000;
+
+export class TemplateLimitError extends Error {
+  constructor(what: string) {
+    super(
+      `This template is too large or loops too long to run (${what}). Check your loop conditions and repeat counts.`,
+    );
+    this.name = 'TemplateLimitError';
+  }
+}
+
+const tick = (ctx: Ctx): void => {
+  if (++ctx.steps > MAX_STEPS) throw new TemplateLimitError('more than ' + MAX_STEPS.toLocaleString('en-US') + ' loop steps');
+};
+
 const MARKER_SNIPPET = 'unresolved variable "';
 
 // Rendering against an empty selection (no row at all) must not throw: fields just come back blank.
@@ -66,6 +85,7 @@ export function createCtx(
     currentMetafield: null,
     ctl: 0,
     sawMarker: false,
+    steps: 0,
     window: null,
   };
 }
@@ -189,31 +209,53 @@ const codePointLength = (s: string): number => {
 // The evaluator. `numeric` is true only inside an equation / numeric tag parameter, where a plain
 // token must read as a number (empty or non-numeric -> 0).
 export function evalNodes(nodes: Node[], from: number, ctx: Ctx, sc: Scope, numeric: boolean): string {
-  let out = '';
+  const lv: Level = { out: '' };
+  runSeq(nodes, from, ctx, sc, numeric, lv, null);
+  return lv.out;
+}
+
+// A text level: the output built by one sequence AND the bodies of any `{{ #if }}` blocks inside it. If-blocks
+// are transparent -- the chosen branch's text simply continues the level -- which is what lets an `{{ #insert }}`
+// inside a branch splice into the text before the if and after it, like the legacy engine (where the if tags
+// vanished before anything else ran). Every other block starts a new level.
+interface Level {
+  out: string;
+}
+
+// The rest of an enclosing sequence, to continue with after an if-branch ends.
+interface Cont {
+  nodes: Node[];
+  next: number;
+  up: Cont | null;
+}
+
+// Evaluates nodes[from..] into `lv`. Returns true when an {{ #insert }} consumed the rest of the level (the
+// caller must then stop: everything after the insert has already been rendered into the result).
+function runSeq(nodes: Node[], from: number, ctx: Ctx, sc: Scope, numeric: boolean, lv: Level, up: Cont | null): boolean {
   for (let n = from; n < nodes.length; n++) {
     const node = nodes[n];
     switch (node.k) {
       case 'text':
-        out += node.s;
+        lv.out += node.s;
         break;
       case 'empty':
-        if (numeric) out += '0';
+        if (numeric) lv.out += '0';
         break;
       case 'field': {
         const raw = node.resolve(ctx, sc);
         if (numeric) {
           const parsed = parseFloat(raw);
-          out += Number.isFinite(parsed) ? String(parsed) : '0';
+          lv.out += Number.isFinite(parsed) ? String(parsed) : '0';
         } else {
-          out += raw;
+          lv.out += raw;
         }
         break;
       }
       case 'math':
-        out += evalMath(node.expr, ctx, sc, numeric);
+        lv.out += evalMath(node.expr, ctx, sc, numeric);
         break;
       case 'time':
-        out += formatDateTime(ctx.now, evalNodes(node.fmt, 0, ctx, sc, false));
+        lv.out += formatDateTime(ctx.now, evalNodes(node.fmt, 0, ctx, sc, false));
         break;
       case 'assign':
         ctx.vars.set(node.name, evalNodes(node.value, 0, ctx, sc, false).trim());
@@ -225,8 +267,8 @@ export function evalNodes(nodes: Node[], from: number, ctx: Ctx, sc: Scope, nume
         } catch {
           /* malformed -> blank */
         }
-        if (result === null) out += numeric ? '0' : '';
-        else out += numeric ? (result ? '1' : '0') : result ? 'TRUE' : 'FALSE';
+        if (result === null) lv.out += numeric ? '0' : '';
+        else lv.out += numeric ? (result ? '1' : '0') : result ? 'TRUE' : 'FALSE';
         break;
       }
       case 'ctl':
@@ -244,11 +286,11 @@ export function evalNodes(nodes: Node[], from: number, ctx: Ctx, sc: Scope, nume
           // Part of the condition never evaluated (a bare variable in an equation). Show the failure
           // where the block's output would have gone instead of silently choosing a branch.
           ctx.sawMarker = false;
-          out += evalNodes(parseInline(node.condText), 0, ctx, sc, false);
+          lv.out += evalNodes(parseInline(node.condText), 0, ctx, sc, false);
         } else if (result) {
-          out += evalNodes(node.then, 0, ctx, sc, false);
+          if (runSeq(node.then, 0, ctx, sc, false, lv, { nodes, next: n + 1, up })) return true;
         } else if (node.otherwise) {
-          out += evalNodes(node.otherwise, 0, ctx, sc, false);
+          if (runSeq(node.otherwise, 0, ctx, sc, false, lv, { nodes, next: n + 1, up })) return true;
         }
         break;
       }
@@ -258,29 +300,32 @@ export function evalNodes(nodes: Node[], from: number, ctx: Ctx, sc: Scope, nume
         const chars = Array.from(inner);
         let kept = 0;
         while (kept < chars.length) {
+          tick(ctx);
           ctx.vars.set(node.counter, String(jStart + kept));
           if (condTrue(node.cond, ctx, sc)) break;
           kept += 1;
         }
-        if (kept >= chars.length) out += inner;
-        else if (node.direction === 'R') out += chars.slice(chars.length - kept).join('');
-        else out += chars.slice(0, kept).join('');
+        if (kept >= chars.length) lv.out += inner;
+        else if (node.direction === 'R') lv.out += chars.slice(chars.length - kept).join('');
+        else lv.out += chars.slice(0, kept).join('');
         break;
       }
       case 'repeat': {
         const count = evalNumber(node.count.length ? node.count : null, ctx, sc);
-        out += applyRepeat(evalNodes(node.body, 0, ctx, sc, false), count, node.delineator);
+        const body = evalNodes(node.body, 0, ctx, sc, false);
+        if (count != null && count * (body.length + node.delineator.length) > MAX_REPEAT_OUTPUT) throw new TemplateLimitError('repeat count ' + count);
+        lv.out += applyRepeat(body, count, node.delineator);
         break;
       }
       case 'replace': {
         const search = evalNodes(node.search, 0, ctx, sc, false).trim();
         const replacement = evalNodes(node.replacement, 0, ctx, sc, false).trim();
-        out += applyReplace(evalNodes(node.body, 0, ctx, sc, false), search, replacement);
+        lv.out += applyReplace(evalNodes(node.body, 0, ctx, sc, false), search, replacement);
         break;
       }
       case 'index': {
         const position = evalNumber(node.position.length ? node.position : null, ctx, sc);
-        out += applyIndex(evalNodes(node.body, 0, ctx, sc, false), position);
+        lv.out += applyIndex(evalNodes(node.body, 0, ctx, sc, false), position);
         break;
       }
       case 'insert': {
@@ -288,15 +333,18 @@ export function evalNodes(nodes: Node[], from: number, ctx: Ctx, sc: Scope, nume
         // everything is returned together.
         const position = evalNumber(node.position.length ? node.position : null, ctx, sc);
         const inner = evalNodes(node.body, 0, ctx, sc, false);
-        const after = evalNodes(nodes, n + 1, ctx, sc, false);
-        return applyInsert(out, after, inner, position, node.drop);
+        const rest: Level = { out: '' };
+        let consumed = runSeq(nodes, n + 1, ctx, sc, false, rest, up);
+        for (let c = up; c && !consumed; c = c.up) consumed = runSeq(c.nodes, c.next, ctx, sc, false, rest, c.up);
+        lv.out = applyInsert(lv.out, rest.out, inner, position, node.drop);
+        return true;
       }
       case 'length':
-        out += String(codePointLength(evalNodes(node.body, 0, ctx, sc, false).trim()));
+        lv.out += String(codePointLength(evalNodes(node.body, 0, ctx, sc, false).trim()));
         break;
       case 'wrap': {
         const inner = evalNodes(node.body, 0, ctx, sc, false);
-        out += node.valid
+        lv.out += node.valid
           ? applyWordWrap(
               restoreWhitespaceTokens(inner),
               node.maxChars,
@@ -309,23 +357,23 @@ export function evalNodes(nodes: Node[], from: number, ctx: Ctx, sc: Scope, nume
         break;
       }
       case 'while':
-        out += evalWhile(node, ctx, sc);
+        lv.out += evalWhile(node, ctx, sc);
         break;
       case 'variants':
-        out += evalVariants(node, ctx, sc);
+        lv.out += evalVariants(node, ctx, sc);
         break;
       case 'tags':
-        out += evalTags(node, ctx, sc);
+        lv.out += evalTags(node, ctx, sc);
         break;
       case 'metafields':
-        out += evalMetafields(node, ctx, sc);
+        lv.out += evalMetafields(node, ctx, sc);
         break;
       case 'foreach':
-        out += evalForeach(node, ctx, sc);
+        lv.out += evalForeach(node, ctx, sc);
         break;
     }
   }
-  return out;
+  return false;
 }
 
 function evalMath(expr: Node[], ctx: Ctx, sc: Scope, numeric: boolean): string {
@@ -359,6 +407,7 @@ function evalWhile(node: Extract<Node, { k: 'while' }>, ctx: Ctx, sc: Scope): st
   const saved = ctx.ctl;
   let out = '';
   for (let step = 0; step < MAX_WHILE_ITERATIONS; step++) {
+    tick(ctx);
     if (node.cond !== null && !condTrue(node.cond, ctx, sc)) break;
     ctx.ctl = 0;
     const rendered = evalNodes(node.body, 0, ctx, sc, false);
@@ -387,6 +436,7 @@ function evalVariants(node: Extract<Node, { k: 'variants' }>, ctx: Ctx, sc: Scop
   const saved = ctx.ctl;
   let out = prefix;
   for (let index = 0; index < iterated.length; index++) {
+    tick(ctx);
     ctx.vars.set(node.name, String(index === 0 ? start : readVarNumber(ctx.vars, node.name) + 1));
     ctx.ctl = 0;
     const rendered = evalNodes(node.body, 0, ctx, { row: sc.row, variants: [iterated[index]] }, false);
@@ -404,6 +454,7 @@ function evalTags(node: Extract<Node, { k: 'tags' }>, ctx: Ctx, sc: Scope): stri
   const saved = ctx.ctl;
   let out = '';
   for (let index = 0; index < tags.length; index++) {
+    tick(ctx);
     ctx.vars.set(node.name, String(index === 0 ? start : readVarNumber(ctx.vars, node.name) + 1));
     ctx.vars.set('tag', tags[index]);
     ctx.ctl = 0;
@@ -423,6 +474,7 @@ function evalMetafields(node: Extract<Node, { k: 'metafields' }>, ctx: Ctx, sc: 
   const saved = ctx.ctl;
   let out = '';
   for (let index = 0; index < metafields.length; index++) {
+    tick(ctx);
     ctx.vars.set(node.name, String(index === 0 ? start : readVarNumber(ctx.vars, node.name) + 1));
     ctx.currentMetafield = metafields[index];
     ctx.ctl = 0;
@@ -480,6 +532,7 @@ function evalForeach(node: ForeachNode, ctx: Ctx, sc: Scope): string {
       )
     : '';
   for (let idx = from, within = 0; idx < to; idx++, within++) {
+    tick(ctx);
     ctx.vars.set(node.name, String(within === 0 ? startIndex : readVarNumber(ctx.vars, node.name) + 1));
     const item = filtered[idx];
     ctx.currKind = item.kind;

@@ -16,10 +16,12 @@ export function makeVariant(i: number, overrides: Partial<VariantData> = {}): Va
   };
 }
 
-export function makeProduct(
-  n: number,
-  opts: { variants?: number; tags?: string[]; metafields?: [string, string, string][]; note?: string } & Partial<ProductData> = {},
-): ProductData {
+export interface MakeProductOpts extends Omit<Partial<ProductData>, 'variants' | 'metafields'> {
+  variants?: number;
+  metafields?: [string, string, string][];
+}
+
+export function makeProduct(n: number, opts: MakeProductOpts = {}): ProductData {
   const { variants = 1, tags, metafields, note, ...rest } = opts;
   const vs = Array.from({ length: variants }, (_, k) => makeVariant(n * 10 + k, { title: variants === 1 ? 'Default Title' : `V${k}` }));
   return {
@@ -46,7 +48,7 @@ export function makeProduct(
   };
 }
 
-export const makeProducts = (count: number, opts: Parameters<typeof makeProduct>[1] = {}): ProductData[] =>
+export const makeProducts = (count: number, opts: MakeProductOpts = {}): ProductData[] =>
   Array.from({ length: count }, (_, i) => makeProduct(i + 1, opts));
 
 export const makeNote = (text: string, n = 1): SelectionEntry => ({ id: `note-${n}`, note: text });

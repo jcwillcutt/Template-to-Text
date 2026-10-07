@@ -224,6 +224,8 @@ export interface Ctx {
   ctl: 0 | 1 | 2;
   // Set when an operand resolved to an unresolved-variable marker (see evaluate.ts / evalIf).
   sawMarker: boolean;
+  // Loop iterations executed so far in this file (see MAX_STEPS in evaluate.ts).
+  steps: number;
   // Window onto the first selection-scope foreach's items, when Merge IF split that list into files.
   window: { node: ForeachNode; from: number; to: number } | null;
 }
