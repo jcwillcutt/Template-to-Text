@@ -133,11 +133,17 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   untouched.
 * **#1-#3 implemented in `src/ui/Extension.tsx`** (unverified in a live Shopify admin; pure logic is unit-tested, the
   wiring is pinned by `tests/ui/wiring.test.ts`):
-  * **#1 overflow:** the main product list is now a stack of rows (title, handle, note and variants in one flexible
-    column; quantity in its own) instead of a 4-column `s-table`; pager above and below.
-  * **#2 row click + hover:** clicking anywhere on a product row or a template row selects it, with a `subdued`
-    background on hover; the title link, checkbox, note field and variant checkboxes keep their own behaviour.
-  * **#3 double click:** two clicks on the same template within 400 ms open the editor (ref-tracked, so rapid clicks
-    are caught). The `...` menu buttons are excluded.
-  * Not changed: the Selection view's table (Use/Item/Handle/Qty/Note/Order/Remove) may overflow the same way and has
-    no row click.
+  * **How rows are clickable:** Shopify's admin components deliver click events only for interactive elements
+    (`s-clickable`, `s-button`, `s-checkbox`...). Layout containers like `s-box` have no event props, so handlers placed on
+    them never fire (an earlier attempt failed for exactly this reason). Both lists now use the supported
+    `s-table-row clickDelegate` pattern from Shopify's own index-table example: the row's click is delegated to the
+    checkbox (products) or to the clickable holding the name (templates), and the table supplies the hover highlight.
+  * **#1 overflow:** the product table has two columns -- Product (checkbox, thumbnail, title link, handle, note and
+    variants stacked in one flexible column) and Qty -- instead of four; pager above and below.
+  * **#2:** a click anywhere on a product row toggles it; anywhere on a template row selects it (selected = bold with a
+    check mark). The title link, the note field and the variant checkboxes keep their own behaviour.
+  * **#3:** two clicks on the same template within 400 ms open the editor (ref-tracked; clicks closer than 30 ms are the
+    same physical click delivered twice and are ignored).
+  * Changed look: the pinned/unpinned divider in the template list is gone (pinned templates are still listed first and
+    keep the blue actions button).
+  * Not changed: the Selection view's table may overflow the same way and has no row click.

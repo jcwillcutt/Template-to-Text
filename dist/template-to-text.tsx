@@ -3179,6 +3179,7 @@ function insertIntoText(prev: string, token: string): string {
   return prev.length > 0 ? prev + token : token;
 }
 const DOUBLE_CLICK_MS = 400;
+const DUPLICATE_CLICK_MS = 30;
 interface ClickRecord {
   id: string;
   at: number;
@@ -3189,16 +3190,13 @@ function registerClick(
   now: number,
   windowMs: number = DOUBLE_CLICK_MS,
 ): { isDouble: boolean; next: ClickRecord | null } {
+  if (last && last.id === id && now - last.at < DUPLICATE_CLICK_MS) {
+    return { isDouble: false, next: last };
+  }
   if (last && last.id === id && now - last.at <= windowMs) {
     return { isDouble: true, next: null };
   }
   return { isDouble: false, next: { id, at: now } };
-}
-const INTERACTIVE_SELECTOR =
-  's-link, s-button, s-checkbox, s-text-field, s-text-area, s-search-field, s-menu, s-select, a, button, input, textarea, select, label';
-function isInteractiveTarget(target: unknown, selector: string = INTERACTIVE_SELECTOR): boolean {
-  const el = target as { closest?: (s: string) => unknown } | null;
-  return Boolean(el && typeof el.closest === 'function' && el.closest(selector));
 }
 function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
   const query = rawQuery.trim().toLowerCase();
@@ -3840,8 +3838,6 @@ function Extension() {
     'new-old',
   );
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
-  const [hoveredProductId, setHoveredProductId] = useState<string | null>(null);
-  const [hoveredTemplateId, setHoveredTemplateId] = useState<string | null>(null);
   const lastTemplateClickRef = useRef<ClickRecord | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
@@ -4626,79 +4622,73 @@ function Extension() {
       </s-stack>
     </s-box>
   );
+  const rowDomId = (prefix: string, id: string): string => `${prefix}-${id.replace(/[^A-Za-z0-9]+/g, '-')}`;
   const renderProductRow = (p: ProductData) => {
     const allVariantIds = p.allVariants.map((v: VariantData) => v.id);
     const checkedVariantIds =
       selectedVariantIds[p.id] && selectedVariantIds[p.id].length > 0 ? selectedVariantIds[p.id] : allVariantIds;
     const isSelected = Boolean(selectedProducts[p.id]);
     const url = adminProductUrl(p.id, primaryDomain);
+    const checkboxId = rowDomId('product-select', p.id);
     return (
-      <s-box
-        key={p.id}
-        paddingBlock="small-300"
-        paddingInline="small-200"
-        borderRadius="base"
-        background={hoveredProductId === p.id ? 'subdued' : undefined}
-        onMouseEnter={() => setHoveredProductId(p.id)}
-        onMouseLeave={() => setHoveredProductId((cur) => (cur === p.id ? null : cur))}
-        onClick={(e: any) => {
-          if (isInteractiveTarget(e.target)) return;
-          toggleProduct(p, !isSelected);
-        }}
-      >
-        <s-grid gridTemplateColumns="auto 1fr auto" gap="base" alignItems="start">
-          <s-checkbox
-            accessibilityLabel={`Select ${p.title}`}
-            checked={isSelected}
-            onChange={(e: any) => toggleProduct(p, e.currentTarget.checked)}
-          />
-          <s-stack gap="small-400">
-            <s-stack direction="inline" gap="small" alignItems="center">
-              {p.imageUrl ? <s-thumbnail size="small" src={p.imageUrl} alt={p.title} /> : null}
-              {url ? (
-                <s-link href={url} target="_blank">
+      <s-table-row key={p.id} clickDelegate={checkboxId}>
+        <s-table-cell>
+          <s-grid gridTemplateColumns="auto 1fr" gap="base" alignItems="start">
+            <s-checkbox
+              id={checkboxId}
+              accessibilityLabel={`Select ${p.title}`}
+              checked={isSelected}
+              onChange={(e: any) => toggleProduct(p, e.currentTarget.checked)}
+            />
+            <s-stack gap="small-400">
+              <s-stack direction="inline" gap="small" alignItems="center">
+                {p.imageUrl ? <s-thumbnail size="small" src={p.imageUrl} alt={p.title} /> : null}
+                {url ? (
+                  <s-link href={url} target="_blank">
+                    <s-text type="strong">{p.title}</s-text>
+                  </s-link>
+                ) : (
                   <s-text type="strong">{p.title}</s-text>
-                </s-link>
-              ) : (
-                <s-text type="strong">{p.title}</s-text>
-              )}
-            </s-stack>
-            <s-text color="subdued">{p.handle}</s-text>
-            {isSelected ? (
-              <s-text-field
-                label={`Note for ${p.title}`}
-                labelAccessibilityVisibility="exclusive"
-                placeholder="Add a note to the selection..."
-                value={productNotes[p.id] || ''}
-                onInput={(e: any) => setProductNote(p.id, e.currentTarget.value)}
-              />
-            ) : null}
-            {isSelected && p.allVariants.length > 1 ? (
-              <s-stack gap="small-200">
-                <s-text color="subdued">
-                  Variants ({checkedVariantIds.length} of {p.allVariants.length} selected)
-                </s-text>
-                {p.allVariants.map((v: VariantData) => (
-                  <s-checkbox
-                    key={v.id}
-                    label={`${v.title} · ${formatQty(v.inventoryQuantity)}`}
-                    accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
-                    checked={checkedVariantIds.includes(v.id)}
-                    onChange={() =>
-                      toggleVariantChecked(p.id, allVariantIds, v.id, !checkedVariantIds.includes(v.id))
-                    }
-                  />
-                ))}
+                )}
               </s-stack>
-            ) : null}
-          </s-stack>
+              <s-text color="subdued">{p.handle}</s-text>
+              {isSelected ? (
+                <s-text-field
+                  label={`Note for ${p.title}`}
+                  labelAccessibilityVisibility="exclusive"
+                  placeholder="Add a note to the selection..."
+                  value={productNotes[p.id] || ''}
+                  onInput={(e: any) => setProductNote(p.id, e.currentTarget.value)}
+                />
+              ) : null}
+              {isSelected && p.allVariants.length > 1 ? (
+                <s-stack gap="small-200">
+                  <s-text color="subdued">
+                    Variants ({checkedVariantIds.length} of {p.allVariants.length} selected)
+                  </s-text>
+                  {p.allVariants.map((v: VariantData) => (
+                    <s-checkbox
+                      key={v.id}
+                      label={`${v.title} · ${formatQty(v.inventoryQuantity)}`}
+                      accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
+                      checked={checkedVariantIds.includes(v.id)}
+                      onChange={() =>
+                        toggleVariantChecked(p.id, allVariantIds, v.id, !checkedVariantIds.includes(v.id))
+                      }
+                    />
+                  ))}
+                </s-stack>
+              ) : null}
+            </s-stack>
+          </s-grid>
+        </s-table-cell>
+        <s-table-cell>
           <s-text color="subdued">{formatQty(p.totalInventory)}</s-text>
-        </s-grid>
-      </s-box>
+        </s-table-cell>
+      </s-table-row>
     );
   };
-  const handleTemplateRowClick = (e: any, tpl: TemplateData): void => {
-    if (isInteractiveTarget(e.target, 's-button, s-menu, a')) return;
+  const handleTemplateRowClick = (tpl: TemplateData): void => {
     const click = registerClick(lastTemplateClickRef.current, tpl.id, Date.now());
     lastTemplateClickRef.current = click.next;
     if (click.isDouble) {
@@ -6362,20 +6352,26 @@ function Extension() {
 
           {renderProductPager()}
 
-          
-          {productsLoading ? <s-spinner accessibilityLabel="Loading products" /> : null}
-          {displayedProducts.length === 0 && !productsLoading ? (
-            <s-box padding="base">
-              <s-text color="subdued">No products found.</s-text>
-            </s-box>
-          ) : (
-            <s-stack gap="none">
-              {displayedProducts.map((p, index) => [
-                index > 0 ? <s-divider key={`divider-${p.id}`} /> : null,
-                renderProductRow(p),
-              ])}
-            </s-stack>
-          )}
+          <s-table loading={productsLoading}>
+            <s-table-header-row>
+              <s-table-header listSlot="primary">Product</s-table-header>
+              <s-table-header listSlot="inline" format="numeric">
+                Qty
+              </s-table-header>
+            </s-table-header-row>
+            <s-table-body>
+              {displayedProducts.length === 0 && !productsLoading ? (
+                <s-table-row>
+                  <s-table-cell>
+                    <s-text color="subdued">No products found.</s-text>
+                  </s-table-cell>
+                  <s-table-cell />
+                </s-table-row>
+              ) : (
+                displayedProducts.map((p) => renderProductRow(p))
+              )}
+            </s-table-body>
+          </s-table>
           {displayedProducts.length > 0 ? renderProductPager() : null}
         </s-section>
 
@@ -6466,45 +6462,42 @@ function Extension() {
             </s-box>
           ) : null}
 
-          <s-box padding="base">
-            <s-stack gap="none">
-              {templatesLoading ? (
-                <s-spinner accessibilityLabel="Loading templates" />
-              ) : templateGroups.list.length === 0 ? (
-                <s-text color="subdued">
-                  {templates.length === 0
-                    ? 'No templates yet. Use Add to create one.'
-                    : 'No templates match your search.'}
-                </s-text>
-              ) : (
-                templateGroups.list.map((tpl, index) => {
+          {templatesLoading ? (
+            <s-box padding="base">
+              <s-spinner accessibilityLabel="Loading templates" />
+            </s-box>
+          ) : templateGroups.list.length === 0 ? (
+            <s-box padding="base">
+              <s-text color="subdued">
+                {templates.length === 0
+                  ? 'No templates yet. Use Add to create one.'
+                  : 'No templates match your search.'}
+              </s-text>
+            </s-box>
+          ) : (
+            <s-table>
+              <s-table-header-row>
+                <s-table-header listSlot="primary">Template</s-table-header>
+                <s-table-header listSlot="inline">Actions</s-table-header>
+              </s-table-header-row>
+              <s-table-body>
+                {templateGroups.list.map((tpl) => {
                   const isSelected = tpl.id === selectedTemplateId;
-                  const showDivider = index === templateGroups.dividerIndex;
-                  return [
-                    showDivider ? (
-                      <s-box key={`divider-${tpl.id}`} paddingBlock="small-200">
-                        <s-divider />
-                      </s-box>
-                    ) : null,
-                    <s-box
-                      key={tpl.id}
-                      paddingBlock="small-400"
-                      paddingInline="small-200"
-                      borderRadius="base"
-                      background={isSelected || hoveredTemplateId === tpl.id ? 'subdued' : undefined}
-                      onMouseEnter={() => setHoveredTemplateId(tpl.id)}
-                      onMouseLeave={() => setHoveredTemplateId((cur) => (cur === tpl.id ? null : cur))}
-                      onClick={(e: any) => handleTemplateRowClick(e, tpl)}
-                    >
-                      <s-grid gridTemplateColumns="1fr auto" gap="small" alignItems="center">
-                        <s-clickable inlineSize="100%">
+                  const selectId = rowDomId('template-select', tpl.id);
+                  return (
+                    <s-table-row key={tpl.id} clickDelegate={selectId}>
+                      <s-table-cell>
+                        <s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>
                           <s-stack direction="inline" gap="small" alignItems="center">
                             <s-text type={isSelected ? 'strong' : undefined}>
+                              {isSelected ? '✓ ' : ''}
                               {tpl.title || 'Untitled'}
                             </s-text>
                             <s-text color="subdued">.{sanitizeExtension(tpl.extension)}</s-text>
                           </s-stack>
                         </s-clickable>
+                      </s-table-cell>
+                      <s-table-cell>
                         <s-button
                           icon="menu-horizontal"
                           variant={tpl.pinned ? 'primary' : undefined}
@@ -6531,13 +6524,13 @@ function Extension() {
                             Delete template
                           </s-button>
                         </s-menu>
-                      </s-grid>
-                    </s-box>,
-                  ];
-                })
-              )}
-            </s-stack>
-          </s-box>
+                      </s-table-cell>
+                    </s-table-row>
+                  );
+                })}
+              </s-table-body>
+            </s-table>
+          )}
         </s-section>
       </s-grid>
 

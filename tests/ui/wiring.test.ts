@@ -38,26 +38,36 @@ describe('global variable editor has the template editor Insert menus', () => {
   });
 });
 
+// Shopify's admin UI components deliver click events only for interactive elements (s-clickable, s-button,
+// s-checkbox, ...). Layout containers such as s-box have NO event props, so handlers placed on them never fire --
+// which is exactly how an earlier version broke row clicks. Whole-row click + hover is done with the supported
+// `s-table-row clickDelegate` pattern (Shopify's own index-table example).
+describe('rows are clickable through clickDelegate, not through layout-container events', () => {
+  it('no mouse/click handlers on s-box', () => {
+    expect(src).not.toMatch(/<s-box[^>]*\bonClick=/);
+    expect(src).not.toMatch(/<s-box[^>]*\bonMouse(Enter|Leave)=/);
+    expect(src).not.toMatch(/\bhovered(Product|Template)Id\b/);
+  });
+});
+
 describe('product list', () => {
   const row = between('const renderProductRow', 'const handleTemplateRowClick');
-  it('is no longer an s-table (its Handle/Qty columns overflowed the column)', () => {
-    expect(between('{renderProductPager()}', '{displayedProducts.length > 0 ? renderProductPager()')).not.toContain('<s-table');
+  it('is a table with a Product column and a Qty column (no separate Handle column to overflow)', () => {
+    const list = between('{renderProductPager()}', '{displayedProducts.length > 0 ? renderProductPager()');
+    expect(list).toContain('<s-table loading={productsLoading}>');
+    expect(list).toContain('<s-table-header listSlot="primary">Product</s-table-header>');
+    expect(list).not.toContain('>Handle<');
   });
-  it('a click anywhere on the row toggles it, except on interactive children', () => {
-    expect(row).toContain('onClick={(e: any) => {');
-    expect(row).toContain('if (isInteractiveTarget(e.target)) return;');
-    expect(row).toContain('toggleProduct(p, !isSelected)');
-  });
-  it('highlights on hover', () => {
-    expect(row).toContain("background={hoveredProductId === p.id ? 'subdued' : undefined}");
-    expect(row).toContain('onMouseEnter');
-    expect(row).toContain('onMouseLeave');
+  it('the row delegates its click to the selection checkbox, so anywhere on the row selects it', () => {
+    expect(row).toContain('<s-table-row key={p.id} clickDelegate={checkboxId}>');
+    expect(row).toContain('id={checkboxId}');
+    expect(row).toContain("rowDomId('product-select', p.id)");
   });
   it('the title is still a link to the admin product page', () => {
     expect(row).toContain('<s-link href={url} target="_blank">');
   });
-  it('title, handle, note and variants share one flexible column; quantity is its own column', () => {
-    expect(row).toContain('gridTemplateColumns="auto 1fr auto"');
+  it('title, handle, note and variants share one flexible column', () => {
+    expect(row).toContain('gridTemplateColumns="auto 1fr"');
   });
   it('the pager is shown above and below the list', () => {
     expect(src.match(/renderProductPager\(\)/g)).toHaveLength(2);
@@ -65,18 +75,19 @@ describe('product list', () => {
 });
 
 describe('template list', () => {
-  const list = between('templateGroups.list.map((tpl, index) => {', '</s-menu>');
-  it('selects on a click anywhere on the row and highlights on hover', () => {
-    expect(list).toContain('onClick={(e: any) => handleTemplateRowClick(e, tpl)}');
-    expect(list).toContain("isSelected || hoveredTemplateId === tpl.id ? 'subdued' : undefined");
+  const list = between('templateGroups.list.map((tpl) => {', '</s-menu>');
+  it('every row delegates to the clickable holding its name, and that clickable handles the click', () => {
+    expect(list).toContain('<s-table-row key={tpl.id} clickDelegate={selectId}>');
+    expect(list).toContain('<s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>');
+    expect(list).toContain("rowDomId('template-select', tpl.id)");
   });
-  it('the inner clickable no longer selects by itself (it would double-count clicks)', () => {
-    expect(list).not.toContain('onClick={() => setSelectedTemplateId(tpl.id)}');
-  });
-  it('a double click opens the editor, using a ref-tracked click record', () => {
+  it('a click selects and a double click opens the editor, via a ref-tracked click record', () => {
     const handler = between('const handleTemplateRowClick', 'const openEditTemplate');
     expect(handler).toContain('registerClick(lastTemplateClickRef.current, tpl.id, Date.now())');
     expect(handler).toContain('openEditTemplate(tpl)');
-    expect(handler).toContain("isInteractiveTarget(e.target, 's-button, s-menu, a')");
+    expect(handler).toContain('setSelectedTemplateId(tpl.id)');
+  });
+  it('the actions button and menu live in their own cell (secondary actions)', () => {
+    expect(list).toContain('commandFor={`tpl-menu-${tpl.id}`}');
   });
 });

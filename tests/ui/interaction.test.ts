@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DOUBLE_CLICK_MS, insertIntoText, isInteractiveTarget, registerClick, type ClickRecord } from '../../src/ui/interaction';
+import { DOUBLE_CLICK_MS, DUPLICATE_CLICK_MS, insertIntoText, registerClick, type ClickRecord } from '../../src/ui/interaction';
 
 describe('insertIntoText (editor Insert menus)', () => {
   it('replaces every {{ insert }} placeholder', () => {
@@ -46,24 +46,14 @@ describe('registerClick (double click detection)', () => {
   it('a double click is consumed: the third click starts a new pair', () => {
     expect(run([['a', 0], ['a', 100], ['a', 150], ['a', 200]])).toEqual([false, true, false, true]);
   });
+  it('the same click delivered twice within milliseconds (real click + delegated click) is ignored, not a double click', () => {
+    expect(run([['a', 0], ['a', 2]])).toEqual([false, false]);
+    expect(DUPLICATE_CLICK_MS).toBeLessThan(60);
+  });
+  it('a duplicate does not reset the pair: a real second click shortly after still opens', () => {
+    expect(run([['a', 0], ['a', 3], ['a', 150]])).toEqual([false, false, true]);
+  });
   it('select-then-double-click sequence: first click selects, second opens', () => {
     expect(run([['x', 0], ['y', 600], ['y', 700]])).toEqual([false, false, true]);
-  });
-});
-
-describe('isInteractiveTarget', () => {
-  const el = (matches: string[]) => ({ closest: (sel: string) => (matches.some((m) => sel.split(',').map((s) => s.trim()).includes(m)) ? {} : null) });
-  it('is true for controls inside a row', () => {
-    for (const tag of ['s-link', 's-checkbox', 's-text-field', 's-button', 'a', 'input']) expect(isInteractiveTarget(el([tag]))).toBe(true);
-  });
-  it('is false for plain row content and for missing targets', () => {
-    expect(isInteractiveTarget(el([]))).toBe(false);
-    expect(isInteractiveTarget(null)).toBe(false);
-    expect(isInteractiveTarget({})).toBe(false);
-    expect(isInteractiveTarget(undefined)).toBe(false);
-  });
-  it('accepts a custom selector (template rows treat s-clickable as part of the row)', () => {
-    expect(isInteractiveTarget(el(['s-clickable']), 's-button, s-menu')).toBe(false);
-    expect(isInteractiveTarget(el(['s-menu']), 's-button, s-menu')).toBe(true);
   });
 });
