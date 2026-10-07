@@ -1,0 +1,20 @@
+{
+  "name": "template-to-text-dev",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Dev tooling for Template to Text: modular source in src/, concatenated into ONE file for Shopify. Legacy single-file sources in the repo root are untouched.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "node --expose-gc ./node_modules/vite-node/vite-node.mjs scripts/bench.ts",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "fast-check": "^3.23.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
