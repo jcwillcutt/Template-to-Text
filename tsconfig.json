@@ -10,6 +10,6 @@
     "jsx": "react-jsx",
     "lib": ["ES2022"]
   },
-  "include": ["src/domain/**/*.ts", "src/format/**/*.ts", "src/engine/**/*.ts", "tests/**/*.ts", "scripts/**/*.mjs"],
+  "include": ["src/domain/**/*.ts", "src/format/**/*.ts", "src/engine/**/*.ts", "src/ui/interaction.ts", "tests/**/*.ts", "scripts/**/*.mjs"],
   "exclude": ["node_modules", "dist"]
 }

@@ -25,6 +25,7 @@ import {
   LENGTH_PREFIX_REGEX,
   RESERVED_ASSIGNMENT_NAMES,
   TIME_PREFIX_REGEX,
+  applyWhitespaceControl,
   applyWhitespaceTokens,
   isVariableName,
   spliceGlobalVariables,
@@ -638,7 +639,12 @@ export function compileTemplate(body: string, globalBodiesByTitle: Record<string
     cache.set(key, hit);
     return hit;
   }
-  const prepared = spliceGlobalVariables(stripComments(applyWhitespaceTokens(body)), globalBodiesByTitle);
+  const globals: Record<string, string> = {};
+  for (const [name] of referenced) globals[name] = applyWhitespaceControl(globalBodiesByTitle[name]);
+  const prepared = spliceGlobalVariables(
+    stripComments(applyWhitespaceTokens(applyWhitespaceControl(body))),
+    referenced.length > 0 ? globals : globalBodiesByTitle,
+  );
   const compiled = parseFull(prepared);
   cache.set(key, compiled);
   if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value as string);

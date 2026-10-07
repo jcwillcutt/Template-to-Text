@@ -309,3 +309,17 @@ export function restoreWhitespaceTokens(text: string): string {
   // so nothing downstream can strip them.
   return text.split(NEWLINE_SENTINEL).join(String.fromCharCode(10)).split(SPACE_SENTINEL).join(' ');
 }
+
+// Whitespace control, in analogy with Liquid's `{%- -%}`: `{-{` removes the newline BEFORE the tag (and any
+// spaces/tabs between that newline and the tag, i.e. its indentation); `}-}` removes the newline AFTER the tag
+// (and any spaces/tabs between the tag and that newline). Both are otherwise ordinary `{{` / `}}`, and may be
+// combined on one tag: `{-{ x }-}`. Applied to the raw template (and to global bodies) before anything else, so
+// it also works on block tags: `{{ #if=... }-}`.
+export function applyWhitespaceControl(body: string): string {
+  if (body.indexOf('{-{') === -1 && body.indexOf('}-}') === -1) return body;
+  return body
+    .replace(/(?:\r\n|\n|\r)[ \t]*\{-\{/g, '{{')
+    .replace(/\{-\{/g, '{{')
+    .replace(/\}-\}[ \t]*(?:\r\n|\n|\r)/g, '}}')
+    .replace(/\}-\}/g, '}}');
+}

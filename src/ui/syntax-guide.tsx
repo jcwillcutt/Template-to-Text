@@ -110,6 +110,18 @@ the equivalent letters: dd, MM, yyyy, ddd, MMM, yy).
 Use these when you need whitespace somewhere that would otherwise get trimmed, such as
 inside a wrap block's delineator (see section 12).
 
+Trimming newlines around a tag -- like Liquid's {%- -%}:
+{-{ ... }}   Removes the newline just BEFORE the tag (plus any indentation in front of it)
+{{ ... }-}   Removes the newline just AFTER the tag (plus any spaces before that newline)
+Use {-{ at the start and }-} at the end of any token or block tag -- variables, #if, loops,
+comments -- so a tag that sits on its own line leaves no blank line behind. Both can be used
+on the same tag: {-{ x }-}. Only ONE newline is removed on each side, and only when it is
+directly next to the tag.
+  {{ #tags.foreach t, i=0 }-}
+  {{ tag }}
+  {-{ /tags.foreach }}
+  -->  abc   (instead of a blank line before and after every tag)
+
 
 5. VARIABLES AND MATH
 ----------------------

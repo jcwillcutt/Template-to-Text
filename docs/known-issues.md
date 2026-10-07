@@ -131,5 +131,13 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   Reproduction, tests and the cause are in `tests/engine/reported-issues.test.ts` and `docs/engine-rewrite.md`.
   The old patch (`docs/patches/lazy-if-evaluation.patch`) is kept for reference; it targets the legacy file, which is
   untouched.
-* **#1-#3 (table overflow, row click, double click): not yet implemented.** They change the Polaris layout in
-  `src/ui/Extension.tsx` and need checking against a live Shopify admin; the designs above stand.
+* **#1-#3 implemented in `src/ui/Extension.tsx`** (unverified in a live Shopify admin; pure logic is unit-tested, the
+  wiring is pinned by `tests/ui/wiring.test.ts`):
+  * **#1 overflow:** the main product list is now a stack of rows (title, handle, note and variants in one flexible
+    column; quantity in its own) instead of a 4-column `s-table`; pager above and below.
+  * **#2 row click + hover:** clicking anywhere on a product row or a template row selects it, with a `subdued`
+    background on hover; the title link, checkbox, note field and variant checkboxes keep their own behaviour.
+  * **#3 double click:** two clicks on the same template within 400 ms open the editor (ref-tracked, so rapid clicks
+    are caught). The `...` menu buttons are excluded.
+  * Not changed: the Selection view's table (Use/Item/Handle/Qty/Note/Order/Remove) may overflow the same way and has
+    no row click.

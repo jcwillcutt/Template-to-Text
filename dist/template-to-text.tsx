@@ -752,6 +752,14 @@ function applyWhitespaceTokens(body: string): string {
 function restoreWhitespaceTokens(text: string): string {
   return text.split(NEWLINE_SENTINEL).join(String.fromCharCode(10)).split(SPACE_SENTINEL).join(' ');
 }
+function applyWhitespaceControl(body: string): string {
+  if (body.indexOf('{-{') === -1 && body.indexOf('}-}') === -1) return body;
+  return body
+    .replace(/(?:\r\n|\n|\r)[ \t]*\{-\{/g, '{{')
+    .replace(/\{-\{/g, '{{')
+    .replace(/\}-\}[ \t]*(?:\r\n|\n|\r)/g, '}}')
+    .replace(/\}-\}/g, '}}');
+}
 function findMatchingClose(text: string, openIndex: number): number {
   let depth = 0;
   let i = openIndex;
@@ -1591,6 +1599,8 @@ const SPACE_TOKEN_SNIPPET = '{{ /space }}';
 const VARIABLE_NAMES = ['i', 'j', 'k', 'l', 'x', 'y', 'z'];
 const ASSIGN_TOKEN = '{{ x = }}';
 const ASSIGN_TOKEN_DOLLAR = '{{ $x = }}';
+const TRIM_BEFORE_SNIPPET = '{-{ product.title }}';
+const TRIM_AFTER_SNIPPET = '{{ product.title }-}';
 type RowKind = 'product' | 'variant' | 'note';
 interface KindedRow {
   row: ProductData;
@@ -2415,7 +2425,12 @@ function compileTemplate(body: string, globalBodiesByTitle: Record<string, strin
     cache.set(key, hit);
     return hit;
   }
-  const prepared = spliceGlobalVariables(stripComments(applyWhitespaceTokens(body)), globalBodiesByTitle);
+  const globals: Record<string, string> = {};
+  for (const [name] of referenced) globals[name] = applyWhitespaceControl(globalBodiesByTitle[name]);
+  const prepared = spliceGlobalVariables(
+    stripComments(applyWhitespaceTokens(applyWhitespaceControl(body))),
+    referenced.length > 0 ? globals : globalBodiesByTitle,
+  );
   const compiled = parseFull(prepared);
   cache.set(key, compiled);
   if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
@@ -3155,6 +3170,36 @@ function yieldToBrowser(): Promise<void> {
     setTimeout(resolve, 0);
   });
 }
+const INSERT_PLACEHOLDER_TEXT = '{{ insert }}';
+function insertIntoText(prev: string, token: string): string {
+  const placeholder = /\{\{\s*insert\s*\}\}/g;
+  if (placeholder.test(prev)) {
+    return prev.replace(/\{\{\s*insert\s*\}\}/g, () => token);
+  }
+  return prev.length > 0 ? prev + token : token;
+}
+const DOUBLE_CLICK_MS = 400;
+interface ClickRecord {
+  id: string;
+  at: number;
+}
+function registerClick(
+  last: ClickRecord | null,
+  id: string,
+  now: number,
+  windowMs: number = DOUBLE_CLICK_MS,
+): { isDouble: boolean; next: ClickRecord | null } {
+  if (last && last.id === id && now - last.at <= windowMs) {
+    return { isDouble: true, next: null };
+  }
+  return { isDouble: false, next: { id, at: now } };
+}
+const INTERACTIVE_SELECTOR =
+  's-link, s-button, s-checkbox, s-text-field, s-text-area, s-search-field, s-menu, s-select, a, button, input, textarea, select, label';
+function isInteractiveTarget(target: unknown, selector: string = INTERACTIVE_SELECTOR): boolean {
+  const el = target as { closest?: (s: string) => unknown } | null;
+  return Boolean(el && typeof el.closest === 'function' && el.closest(selector));
+}
 function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
   const query = rawQuery.trim().toLowerCase();
   if (query === '') return true;
@@ -3331,6 +3376,18 @@ the equivalent letters: dd, MM, yyyy, ddd, MMM, yy).
 
 Use these when you need whitespace somewhere that would otherwise get trimmed, such as
 inside a wrap block's delineator (see section 12).
+
+Trimming newlines around a tag -- like Liquid's {%- -%}:
+{-{ ... }}   Removes the newline just BEFORE the tag (plus any indentation in front of it)
+{{ ... }-}   Removes the newline just AFTER the tag (plus any spaces before that newline)
+Use {-{ at the start and }-} at the end of any token or block tag -- variables, #if, loops,
+comments -- so a tag that sits on its own line leaves no blank line behind. Both can be used
+on the same tag: {-{ x }-}. Only ONE newline is removed on each side, and only when it is
+directly next to the tag.
+  {{ #tags.foreach t, i=0 }-}
+  {{ tag }}
+  {-{ /tags.foreach }}
+  -->  abc   (instead of a blank line before and after every tag)
 
 
 5. VARIABLES AND MATH
@@ -3783,6 +3840,9 @@ function Extension() {
     'new-old',
   );
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [hoveredProductId, setHoveredProductId] = useState<string | null>(null);
+  const [hoveredTemplateId, setHoveredTemplateId] = useState<string | null>(null);
+  const lastTemplateClickRef = useRef<ClickRecord | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
   const [pinningId, setPinningId] = useState<string | null>(null);
@@ -3799,7 +3859,6 @@ function Extension() {
   const [editorError, setEditorError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const INSERT_PLACEHOLDER = '{{ insert }}';
-  const INSERT_PLACEHOLDER_REGEX = /\{\{\s*insert\s*\}\}/g;
   const originalEditorRef = useRef<{
     title: string;
     body: string;
@@ -4407,6 +4466,247 @@ function Extension() {
     };
     setView('editor');
   };
+  const renderInsertButtons = (prefix: string) => (
+            <s-stack direction="inline" gap="small" alignItems="center">
+              <s-button icon="plus" commandFor={`${prefix}insert-variable-menu`}>
+                Insert variable
+              </s-button>
+              <s-button icon="plus" commandFor={`${prefix}insert-special-menu`}>
+                Insert special
+              </s-button>
+            </s-stack>
+  );
+  const renderInsertMenus = (prefix: string, onInsert: (token: string) => void, withGlobals: boolean) => (
+    <>
+            <s-menu id={`${prefix}insert-variable-menu`} accessibilityLabel="Insert variable">
+              <s-text color="subdued">
+                Selected variable replaces all instances of {INSERT_PLACEHOLDER}
+              </s-text>
+              <s-section heading="Product fields">
+                {PRODUCT_FIELD_TOKENS.map((t) => (
+                  <s-button key={t.token} onClick={() => onInsert(t.token)}>
+                    {t.label}
+                  </s-button>
+                ))}
+              </s-section>
+              <s-section heading="Variant fields">
+                {VARIANT_FIELD_TOKENS.map((t) => (
+                  <s-button key={t.token} onClick={() => onInsert(t.token)}>
+                    {t.label}
+                  </s-button>
+                ))}
+              </s-section>
+              {metafieldTokens.length > 0 ? (
+                <s-section heading="Metafields">
+                  {metafieldTokens.map((t) => (
+                    <s-button key={t.token} onClick={() => onInsert(t.token)}>
+                      {t.label}
+                    </s-button>
+                  ))}
+                </s-section>
+              ) : null}
+              {withGlobals && globalVars.length > 0 ? (
+                <s-section heading="Global variables">
+                  {globalVars.map((g: GlobalVarEntry) => (
+                    <s-button key={g.id} onClick={() => onInsert(`{{ $global:${g.title} }}`)}>
+                      {g.title}
+                    </s-button>
+                  ))}
+                </s-section>
+              ) : null}
+            </s-menu>
+            <s-menu id={`${prefix}insert-special-menu`} accessibilityLabel="Insert special">
+              <s-text color="subdued">
+                Selected variable replaces all instances of {INSERT_PLACEHOLDER}
+              </s-text>
+              <s-section heading="Selection">
+                <s-button onClick={() => onInsert(FOREACH_BLOCK)}>For each loop</s-button>
+                <s-button onClick={() => onInsert(NOTES_LOOP_BLOCK)}>Notes foreach</s-button>
+                <s-button onClick={() => onInsert('{{ selection.length }}')}>
+                  Number of products selected
+                </s-button>
+                <s-button onClick={() => onInsert('{{ selection.first.product.handle }}')}>
+                  First product handle
+                </s-button>
+                <s-button onClick={() => onInsert('{{ selection.last.product.handle }}')}>
+                  Last product handle
+                </s-button>
+                <s-button onClick={() => onInsert('{{ product.length }}')}>
+                  Number of variants
+                </s-button>
+                <s-button onClick={() => onInsert(VARIANT_LOOP_BLOCK)}>
+                  Variant foreach
+                </s-button>
+                <s-button onClick={() => onInsert(TAGS_LOOP_BLOCK)}>Tags foreach</s-button>
+                <s-button onClick={() => onInsert(METAFIELDS_LOOP_BLOCK)}>
+                  Metafields foreach
+                </s-button>
+                <s-button onClick={() => onInsert('{{ selection.next.product.title }}')}>
+                  Next object's field
+                </s-button>
+                <s-button onClick={() => onInsert('{{ selection.prev.product.title }}')}>
+                  Previous object's field
+                </s-button>
+                <s-button onClick={() => onInsert('{{ selection.next.type }}')}>
+                  Next object's type
+                </s-button>
+                <s-button onClick={() => onInsert('{{ selection.prev.type }}')}>
+                  Previous object's type
+                </s-button>
+                <s-button onClick={() => onInsert('{{ selection.curr.type }}')}>
+                  Current object's type
+                </s-button>
+              </s-section>
+              <s-section heading="Variables">
+                <s-button onClick={() => onInsert(ASSIGN_TOKEN)}>Assign variable</s-button>
+                <s-button onClick={() => onInsert(ASSIGN_TOKEN_DOLLAR)}>
+                  Assign variable ($, collision-safe)
+                </s-button>
+                {VARIABLE_NAMES.map((name) => (
+                  <s-button key={name} onClick={() => onInsert(`{{ ${name} }}`)}>
+                    Variable {name}
+                  </s-button>
+                ))}
+              </s-section>
+              <s-section heading="Functions">
+                <s-button onClick={() => onInsert(WHILE_BLOCK)}>While loop</s-button>
+                <s-button onClick={() => onInsert(CHOP_BLOCK)}>Chop block</s-button>
+                <s-button onClick={() => onInsert(WRAP_BLOCK)}>Word wrap</s-button>
+                <s-button onClick={() => onInsert(REPEAT_BLOCK)}>Repeat</s-button>
+                <s-button onClick={() => onInsert(REPLACE_BLOCK)}>Replace</s-button>
+                <s-button onClick={() => onInsert(INDEX_BLOCK)}>Index</s-button>
+                <s-button onClick={() => onInsert(INSERT_BLOCK)}>Insert block</s-button>
+                <s-button onClick={() => onInsert(IF_BLOCK)}>If block</s-button>
+                <s-button onClick={() => onInsert(COMMENT_BLOCK)}>Comment block</s-button>
+                <s-button onClick={() => onInsert(BREAK_TOKEN_BLOCK)}>Break</s-button>
+                <s-button onClick={() => onInsert(SKIP_TOKEN_BLOCK)}>Skip</s-button>
+              </s-section>
+              <s-section heading="Functional tokens">
+                <s-button onClick={() => onInsert('{{ =0 }}')}>Math equation</s-button>
+                <s-button onClick={() => onInsert(BOOLEAN_TOKEN)}>Boolean equation</s-button>
+                <s-button onClick={() => onInsert(LENGTH_TOKEN)}>String length</s-button>
+              </s-section>
+              <s-section heading="Special tokens">
+                <s-button onClick={() => onInsert(NEWLINE_TOKEN_SNIPPET)}>New line</s-button>
+                <s-button onClick={() => onInsert(SPACE_TOKEN_SNIPPET)}>Space</s-button>
+                <s-button onClick={() => onInsert(TRIM_BEFORE_SNIPPET)}>
+                  Trim newline before a tag
+                </s-button>
+                <s-button onClick={() => onInsert(TRIM_AFTER_SNIPPET)}>
+                  Trim newline after a tag
+                </s-button>
+                <s-button onClick={() => onInsert(DATE_TOKEN)}>Date</s-button>
+                <s-button onClick={() => onInsert(TIME_TOKEN)}>Time</s-button>
+                <s-button onClick={() => onInsert(DATE_TIME_TOKEN)}>Date and time</s-button>
+                <s-button onClick={() => onInsert(WEEKDAY_DATE_TOKEN)}>
+                  Weekday, month day, year
+                </s-button>
+                <s-button onClick={() => onInsert('{{ primaryDomain }}')}>
+                  Shop primary domain
+                </s-button>
+              </s-section>
+            </s-menu>
+    </>
+  );
+  const renderProductPager = () => (
+    <s-box background="subdued" paddingBlock="small-300" paddingInline="small-200">
+      <s-stack direction="inline" gap="small-200" alignItems="center" justifyContent="end">
+        <s-button
+          icon="chevron-left"
+          accessibilityLabel="Previous page of products"
+          disabled={!productPageInfo?.hasPreviousPage}
+          onClick={handlePrevProducts}
+        />
+        <s-button
+          icon="chevron-right"
+          accessibilityLabel="Next page of products"
+          disabled={!productPageInfo?.hasNextPage}
+          onClick={handleNextProducts}
+        />
+      </s-stack>
+    </s-box>
+  );
+  const renderProductRow = (p: ProductData) => {
+    const allVariantIds = p.allVariants.map((v: VariantData) => v.id);
+    const checkedVariantIds =
+      selectedVariantIds[p.id] && selectedVariantIds[p.id].length > 0 ? selectedVariantIds[p.id] : allVariantIds;
+    const isSelected = Boolean(selectedProducts[p.id]);
+    const url = adminProductUrl(p.id, primaryDomain);
+    return (
+      <s-box
+        key={p.id}
+        paddingBlock="small-300"
+        paddingInline="small-200"
+        borderRadius="base"
+        background={hoveredProductId === p.id ? 'subdued' : undefined}
+        onMouseEnter={() => setHoveredProductId(p.id)}
+        onMouseLeave={() => setHoveredProductId((cur) => (cur === p.id ? null : cur))}
+        onClick={(e: any) => {
+          if (isInteractiveTarget(e.target)) return;
+          toggleProduct(p, !isSelected);
+        }}
+      >
+        <s-grid gridTemplateColumns="auto 1fr auto" gap="base" alignItems="start">
+          <s-checkbox
+            accessibilityLabel={`Select ${p.title}`}
+            checked={isSelected}
+            onChange={(e: any) => toggleProduct(p, e.currentTarget.checked)}
+          />
+          <s-stack gap="small-400">
+            <s-stack direction="inline" gap="small" alignItems="center">
+              {p.imageUrl ? <s-thumbnail size="small" src={p.imageUrl} alt={p.title} /> : null}
+              {url ? (
+                <s-link href={url} target="_blank">
+                  <s-text type="strong">{p.title}</s-text>
+                </s-link>
+              ) : (
+                <s-text type="strong">{p.title}</s-text>
+              )}
+            </s-stack>
+            <s-text color="subdued">{p.handle}</s-text>
+            {isSelected ? (
+              <s-text-field
+                label={`Note for ${p.title}`}
+                labelAccessibilityVisibility="exclusive"
+                placeholder="Add a note to the selection..."
+                value={productNotes[p.id] || ''}
+                onInput={(e: any) => setProductNote(p.id, e.currentTarget.value)}
+              />
+            ) : null}
+            {isSelected && p.allVariants.length > 1 ? (
+              <s-stack gap="small-200">
+                <s-text color="subdued">
+                  Variants ({checkedVariantIds.length} of {p.allVariants.length} selected)
+                </s-text>
+                {p.allVariants.map((v: VariantData) => (
+                  <s-checkbox
+                    key={v.id}
+                    label={`${v.title} · ${formatQty(v.inventoryQuantity)}`}
+                    accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
+                    checked={checkedVariantIds.includes(v.id)}
+                    onChange={() =>
+                      toggleVariantChecked(p.id, allVariantIds, v.id, !checkedVariantIds.includes(v.id))
+                    }
+                  />
+                ))}
+              </s-stack>
+            ) : null}
+          </s-stack>
+          <s-text color="subdued">{formatQty(p.totalInventory)}</s-text>
+        </s-grid>
+      </s-box>
+    );
+  };
+  const handleTemplateRowClick = (e: any, tpl: TemplateData): void => {
+    if (isInteractiveTarget(e.target, 's-button, s-menu, a')) return;
+    const click = registerClick(lastTemplateClickRef.current, tpl.id, Date.now());
+    lastTemplateClickRef.current = click.next;
+    if (click.isDouble) {
+      openEditTemplate(tpl);
+      return;
+    }
+    setSelectedTemplateId(tpl.id);
+  };
   const openEditTemplate = (tpl: TemplateData): void => {
     setEditingTemplate(tpl);
     setEditorTitle(tpl.title);
@@ -4427,12 +4727,10 @@ function Extension() {
     setView('editor');
   };
   const insertVariable = (token: string): void => {
-    setEditorBody((prev) => {
-      if (INSERT_PLACEHOLDER_REGEX.test(prev)) {
-        return prev.replace(INSERT_PLACEHOLDER_REGEX, () => token);
-      }
-      return prev.length > 0 ? prev + token : token;
-    });
+    setEditorBody((prev) => insertIntoText(prev, token));
+  };
+  const insertIntoGlobalBody = (token: string): void => {
+    setGlobalVarBodyDraft((prev) => insertIntoText(prev, token));
   };
   const refreshTemplatesAndProducts = (): void => {
     fetchTemplates();
@@ -5466,141 +5764,12 @@ function Extension() {
                 <s-text tone="critical">{editorFileBreakError}</s-text>
               ) : null}
             </s-stack>
-            <s-stack direction="inline" gap="small" alignItems="center">
-              <s-button icon="plus" commandFor="insert-variable-menu">
-                Insert variable
-              </s-button>
-              <s-button icon="plus" commandFor="insert-special-menu">
-                Insert special
-              </s-button>
-            </s-stack>
-            <s-menu id="insert-variable-menu" accessibilityLabel="Insert variable">
-              <s-text color="subdued">
-                Selected variable replaces all instances of {INSERT_PLACEHOLDER}
-              </s-text>
-              <s-section heading="Product fields">
-                {PRODUCT_FIELD_TOKENS.map((t) => (
-                  <s-button key={t.token} onClick={() => insertVariable(t.token)}>
-                    {t.label}
-                  </s-button>
-                ))}
-              </s-section>
-              <s-section heading="Variant fields">
-                {VARIANT_FIELD_TOKENS.map((t) => (
-                  <s-button key={t.token} onClick={() => insertVariable(t.token)}>
-                    {t.label}
-                  </s-button>
-                ))}
-              </s-section>
-              {metafieldTokens.length > 0 ? (
-                <s-section heading="Metafields">
-                  {metafieldTokens.map((t) => (
-                    <s-button key={t.token} onClick={() => insertVariable(t.token)}>
-                      {t.label}
-                    </s-button>
-                  ))}
-                </s-section>
-              ) : null}
-              {globalVars.length > 0 ? (
-                <s-section heading="Global variables">
-                  {globalVars.map((g: GlobalVarEntry) => (
-                    <s-button key={g.id} onClick={() => insertVariable(`{{ $global:${g.title} }}`)}>
-                      {g.title}
-                    </s-button>
-                  ))}
-                </s-section>
-              ) : null}
-            </s-menu>
-            <s-menu id="insert-special-menu" accessibilityLabel="Insert special">
-              <s-text color="subdued">
-                Selected variable replaces all instances of {INSERT_PLACEHOLDER}
-              </s-text>
-              <s-section heading="Selection">
-                <s-button onClick={() => insertVariable(FOREACH_BLOCK)}>For each loop</s-button>
-                <s-button onClick={() => insertVariable(NOTES_LOOP_BLOCK)}>Notes foreach</s-button>
-                <s-button onClick={() => insertVariable('{{ selection.length }}')}>
-                  Number of products selected
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ selection.first.product.handle }}')}>
-                  First product handle
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ selection.last.product.handle }}')}>
-                  Last product handle
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ product.length }}')}>
-                  Number of variants
-                </s-button>
-                <s-button onClick={() => insertVariable(VARIANT_LOOP_BLOCK)}>
-                  Variant foreach
-                </s-button>
-                <s-button onClick={() => insertVariable(TAGS_LOOP_BLOCK)}>Tags foreach</s-button>
-                <s-button onClick={() => insertVariable(METAFIELDS_LOOP_BLOCK)}>
-                  Metafields foreach
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ selection.next.product.title }}')}>
-                  Next object's field
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ selection.prev.product.title }}')}>
-                  Previous object's field
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ selection.next.type }}')}>
-                  Next object's type
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ selection.prev.type }}')}>
-                  Previous object's type
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ selection.curr.type }}')}>
-                  Current object's type
-                </s-button>
-              </s-section>
-              <s-section heading="Variables">
-                <s-button onClick={() => insertVariable(ASSIGN_TOKEN)}>Assign variable</s-button>
-                <s-button onClick={() => insertVariable(ASSIGN_TOKEN_DOLLAR)}>
-                  Assign variable ($, collision-safe)
-                </s-button>
-                {VARIABLE_NAMES.map((name) => (
-                  <s-button key={name} onClick={() => insertVariable(`{{ ${name} }}`)}>
-                    Variable {name}
-                  </s-button>
-                ))}
-              </s-section>
-              <s-section heading="Functions">
-                <s-button onClick={() => insertVariable(WHILE_BLOCK)}>While loop</s-button>
-                <s-button onClick={() => insertVariable(CHOP_BLOCK)}>Chop block</s-button>
-                <s-button onClick={() => insertVariable(WRAP_BLOCK)}>Word wrap</s-button>
-                <s-button onClick={() => insertVariable(REPEAT_BLOCK)}>Repeat</s-button>
-                <s-button onClick={() => insertVariable(REPLACE_BLOCK)}>Replace</s-button>
-                <s-button onClick={() => insertVariable(INDEX_BLOCK)}>Index</s-button>
-                <s-button onClick={() => insertVariable(INSERT_BLOCK)}>Insert block</s-button>
-                <s-button onClick={() => insertVariable(IF_BLOCK)}>If block</s-button>
-                <s-button onClick={() => insertVariable(COMMENT_BLOCK)}>Comment block</s-button>
-                <s-button onClick={() => insertVariable(BREAK_TOKEN_BLOCK)}>Break</s-button>
-                <s-button onClick={() => insertVariable(SKIP_TOKEN_BLOCK)}>Skip</s-button>
-              </s-section>
-              <s-section heading="Functional tokens">
-                <s-button onClick={() => insertVariable('{{ =0 }}')}>Math equation</s-button>
-                <s-button onClick={() => insertVariable(BOOLEAN_TOKEN)}>Boolean equation</s-button>
-                <s-button onClick={() => insertVariable(LENGTH_TOKEN)}>String length</s-button>
-              </s-section>
-              <s-section heading="Special tokens">
-                <s-button onClick={() => insertVariable(NEWLINE_TOKEN_SNIPPET)}>New line</s-button>
-                <s-button onClick={() => insertVariable(SPACE_TOKEN_SNIPPET)}>Space</s-button>
-                <s-button onClick={() => insertVariable(DATE_TOKEN)}>Date</s-button>
-                <s-button onClick={() => insertVariable(TIME_TOKEN)}>Time</s-button>
-                <s-button onClick={() => insertVariable(DATE_TIME_TOKEN)}>Date and time</s-button>
-                <s-button onClick={() => insertVariable(WEEKDAY_DATE_TOKEN)}>
-                  Weekday, month day, year
-                </s-button>
-                <s-button onClick={() => insertVariable('{{ primaryDomain }}')}>
-                  Shop primary domain
-                </s-button>
-              </s-section>
-            </s-menu>
+            {renderInsertButtons('')}
+            {renderInsertMenus('', insertVariable, true)}
           </s-stack>
 
           <s-text-area
-            label="Body"
-            labelAccessibilityVisibility="exclusive"
+            label="Body"ssibilityVisibility="exclusive"
             value={editorBody}
             rows={16}
             maxLength={1000000}
@@ -6191,152 +6360,23 @@ function Extension() {
             </s-box>
           ) : null}
 
-          
-          <s-box background="subdued" paddingBlock="small-300" paddingInline="small-200">
-            <s-stack direction="inline" gap="small-200" alignItems="center" justifyContent="end">
-              <s-button
-                icon="chevron-left"
-                accessibilityLabel="Previous page of products"
-                disabled={!productPageInfo?.hasPreviousPage}
-                onClick={handlePrevProducts}
-              />
-              <s-button
-                icon="chevron-right"
-                accessibilityLabel="Next page of products"
-                disabled={!productPageInfo?.hasNextPage}
-                onClick={handleNextProducts}
-              />
-            </s-stack>
-          </s-box>
+          {renderProductPager()}
 
-          <s-table
-            paginate={Boolean(productPageInfo?.hasNextPage || productPageInfo?.hasPreviousPage)}
-            loading={productsLoading}
-            hasNextPage={productPageInfo?.hasNextPage || false}
-            hasPreviousPage={productPageInfo?.hasPreviousPage || false}
-            onNextPage={handleNextProducts}
-            onPreviousPage={handlePrevProducts}
-          >
-            <s-table-header-row>
-              <s-table-header>Select</s-table-header>
-              <s-table-header listSlot="primary">Product</s-table-header>
-              <s-table-header>Handle</s-table-header>
-              <s-table-header>Qty</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {displayedProducts.length === 0 && !productsLoading ? (
-                <s-table-row>
-                  <s-table-cell>
-                    <s-text color="subdued">No products found.</s-text>
-                  </s-table-cell>
-                  <s-table-cell />
-                  <s-table-cell />
-                  <s-table-cell />
-                </s-table-row>
-              ) : (
-                displayedProducts.map((p) => {
-                  const allVariantIds = p.allVariants.map((v: VariantData) => v.id);
-                  const checkedVariantIds =
-                    selectedVariantIds[p.id] && selectedVariantIds[p.id].length > 0
-                      ? selectedVariantIds[p.id]
-                      : allVariantIds;
-                  return (
-                    <s-table-row key={p.id}>
-                      <s-table-cell>
-                        <s-checkbox
-                          accessibilityLabel={`Select ${p.title}`}
-                          checked={Boolean(selectedProducts[p.id])}
-                          onChange={(e: any) => toggleProduct(p, e.currentTarget.checked)}
-                        />
-                      </s-table-cell>
-                      <s-table-cell>
-                        <s-stack gap="small-400">
-                          <s-stack direction="inline" gap="small" alignItems="center">
-                            {p.imageUrl ? (
-                              <s-thumbnail size="small" src={p.imageUrl} alt={p.title} />
-                            ) : null}
-                            {adminProductUrl(p.id, primaryDomain) ? (
-                              <s-link href={adminProductUrl(p.id, primaryDomain)!} target="_blank">
-                                <s-text type="strong">{p.title}</s-text>
-                              </s-link>
-                            ) : (
-                              <s-text type="strong">{p.title}</s-text>
-                            )}
-                          </s-stack>
-                          {selectedProducts[p.id] ? (
-                            <s-text-field
-                              label={`Note for ${p.title}`}
-                              labelAccessibilityVisibility="exclusive"
-                              placeholder="Add a note to the selection..."
-                              value={productNotes[p.id] || ''}
-                              onInput={(e: any) => setProductNote(p.id, e.currentTarget.value)}
-                            />
-                          ) : null}
-                          {selectedProducts[p.id] && p.allVariants.length > 1 ? (
-                            <s-stack gap="small-200">
-                              <s-text color="subdued">
-                                Variants ({checkedVariantIds.length} of {p.allVariants.length}{' '}
-                                selected)
-                              </s-text>
-                              {p.allVariants.map((v: VariantData) => (
-                                <s-checkbox
-                                  key={v.id}
-                                  label={v.title}
-                                  accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
-                                  checked={checkedVariantIds.includes(v.id)}
-                                  onChange={() =>
-                                    toggleVariantChecked(
-                                      p.id,
-                                      allVariantIds,
-                                      v.id,
-                                      !checkedVariantIds.includes(v.id),
-                                    )
-                                  }
-                                />
-                              ))}
-                            </s-stack>
-                          ) : null}
-                        </s-stack>
-                      </s-table-cell>
-                      
-                      <s-table-cell>
-                        <s-stack gap="small-400">
-                          <s-text color="subdued">{p.handle}</s-text>
-                          {selectedProducts[p.id] ? <s-text color="subdued"> </s-text> : null}
-                          {selectedProducts[p.id] && p.allVariants.length > 1 ? (
-                            <s-stack gap="small-200">
-                              <s-text color="subdued"> </s-text>
-                              {p.allVariants.map((v: VariantData) => (
-                                <s-text key={v.id} color="subdued">
-                                  {' '}
-                                </s-text>
-                              ))}
-                            </s-stack>
-                          ) : null}
-                        </s-stack>
-                      </s-table-cell>
-                      <s-table-cell>
-                        <s-stack gap="small-400">
-                          <s-text color="subdued">{formatQty(p.totalInventory)}</s-text>
-                          {selectedProducts[p.id] ? <s-text color="subdued"> </s-text> : null}
-                          {selectedProducts[p.id] && p.allVariants.length > 1 ? (
-                            <s-stack gap="small-200">
-                              <s-text color="subdued"> </s-text>
-                              {p.allVariants.map((v: VariantData) => (
-                                <s-text key={v.id} color="subdued">
-                                  {formatQty(v.inventoryQuantity)}
-                                </s-text>
-                              ))}
-                            </s-stack>
-                          ) : null}
-                        </s-stack>
-                      </s-table-cell>
-                    </s-table-row>
-                  );
-                })
-              )}
-            </s-table-body>
-          </s-table>
+          
+          {productsLoading ? <s-spinner accessibilityLabel="Loading products" /> : null}
+          {displayedProducts.length === 0 && !productsLoading ? (
+            <s-box padding="base">
+              <s-text color="subdued">No products found.</s-text>
+            </s-box>
+          ) : (
+            <s-stack gap="none">
+              {displayedProducts.map((p, index) => [
+                index > 0 ? <s-divider key={`divider-${p.id}`} /> : null,
+                renderProductRow(p),
+              ])}
+            </s-stack>
+          )}
+          {displayedProducts.length > 0 ? renderProductPager() : null}
         </s-section>
 
         <s-section padding="none">
@@ -6451,13 +6491,13 @@ function Extension() {
                       paddingBlock="small-400"
                       paddingInline="small-200"
                       borderRadius="base"
-                      background={isSelected ? 'subdued' : undefined}
+                      background={isSelected || hoveredTemplateId === tpl.id ? 'subdued' : undefined}
+                      onMouseEnter={() => setHoveredTemplateId(tpl.id)}
+                      onMouseLeave={() => setHoveredTemplateId((cur) => (cur === tpl.id ? null : cur))}
+                      onClick={(e: any) => handleTemplateRowClick(e, tpl)}
                     >
                       <s-grid gridTemplateColumns="1fr auto" gap="small" alignItems="center">
-                        <s-clickable
-                          inlineSize="100%"
-                          onClick={() => setSelectedTemplateId(tpl.id)}
-                        >
+                        <s-clickable inlineSize="100%">
                           <s-stack direction="inline" gap="small" alignItems="center">
                             <s-text type={isSelected ? 'strong' : undefined}>
                               {tpl.title || 'Untitled'}
@@ -6871,13 +6911,15 @@ function Extension() {
             error={globalVarTitleError || undefined}
             onInput={(e: any) => setGlobalVarTitleDraft(e.currentTarget.value)}
           />
+          {renderInsertButtons('global-')}
           <s-text-area
             label="Value"
             value={globalVarBodyDraft}
             rows={8}
-            placeholder="What {{ $global:TITLE }} should evaluate to…"
+            placeholder="What {{ $global:TITLE }} should evaluate to. Place {{ insert }} where you want to insert a variable, then choose it from the Insert menus above."
             onInput={(e: any) => setGlobalVarBodyDraft(e.currentTarget.value)}
           />
+          {renderInsertMenus('global-', insertIntoGlobalBody, false)}
           <s-text color="subdued">
             Reference a global variable in any template with {'{{ $global:'}
             {globalVarTitleDraft.trim() || 'TITLE'}
