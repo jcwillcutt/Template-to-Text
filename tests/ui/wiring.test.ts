@@ -91,3 +91,24 @@ describe('template list', () => {
     expect(list).toContain('commandFor={`tpl-menu-${tpl.id}`}');
   });
 });
+
+describe('product search box', () => {
+  it('is a multi-line field (a one-line input flattens pasted line breaks) wired to the live, paste-aware handler', () => {
+    const box = between('<s-text-area\n                  label="Search products"', '<s-button onClick={runSearch}>');
+    expect(box).toContain('onInput={(e: any) => handleSearchInput(e.currentTarget.value)}');
+    expect(box).toContain('onChange={runSearch}');
+  });
+  it('typing searches after a pause; a paste converts to OR and searches immediately', () => {
+    const handler = between('const handleSearchInput', 'useEffect(');
+    expect(handler).toContain('columnToOrQuery(raw)');
+    expect(handler).toContain('applySearchNow(text)');
+    expect(handler).toContain('setTimeout(');
+    expect(handler).toContain('SEARCH_DEBOUNCE_MS');
+  });
+  it('a pending search is cancelled on unmount and replaced by a newer one', () => {
+    expect(src).toContain('clearTimeout(searchTimerRef.current)');
+  });
+  it('the Tab snippet is offered in the Insert menu', () => {
+    expect(src).toContain('TAB_TOKEN_SNIPPET');
+  });
+});

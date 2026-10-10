@@ -36,6 +36,7 @@ export const ORDER = [
   'src/engine/evaluate.ts',
   'src/engine/plan.ts',
   'src/ui/interaction.ts',
+  'src/ui/search-query.ts',
   'src/ui/search.ts',
   'src/ui/format.tsx',
   'src/ui/graphql.ts',

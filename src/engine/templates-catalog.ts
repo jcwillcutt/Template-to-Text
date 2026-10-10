@@ -211,3 +211,4 @@ export const ASSIGN_TOKEN_DOLLAR = '{{ $x = }}';
 // Snippets for the whitespace-control markers: `{-{` trims the newline before a tag, `}-}` the newline after it.
 export const TRIM_BEFORE_SNIPPET = '{-{ product.title }}';
 export const TRIM_AFTER_SNIPPET = '{{ product.title }-}';
+export const TAB_TOKEN_SNIPPET = '{{ /tab }}';

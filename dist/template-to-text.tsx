@@ -727,10 +727,12 @@ const OPEN = BACKSLASH + '{' + BACKSLASH + '{';
 const CLOSE = BACKSLASH + '}' + BACKSLASH + '}';
 const RETURN_TOKEN_PATTERN = OPEN + WS + '/return' + WS + CLOSE;
 const SPACE_ALIAS_TOKEN_PATTERN = OPEN + WS + '/space' + WS + CLOSE;
+const TAB_TOKEN_PATTERN = OPEN + WS + '/tab' + WS + CLOSE;
 const NEWLINE_TOKEN_PATTERN = OPEN + WS + BACKSLASH + BACKSLASH + 'n' + WS + CLOSE;
 const SPACE_TOKEN_PATTERN = OPEN + WS + BACKSLASH + BACKSLASH + 't' + WS + CLOSE;
 const NEWLINE_SENTINEL = String.fromCharCode(1);
 const SPACE_SENTINEL = String.fromCharCode(2);
+const TAB_SENTINEL = String.fromCharCode(5);
 const BREAK_SENTINEL = String.fromCharCode(3);
 const SKIP_SENTINEL = String.fromCharCode(4);
 function applyWhitespaceTokens(body: string): string {
@@ -745,12 +747,20 @@ function applyWhitespaceTokens(body: string): string {
     .replace(new RegExp(SPACE_TOKEN_PATTERN, 'g'), deprecatedSpace);
   const returnToken = new RegExp(RETURN_TOKEN_PATTERN, 'g');
   const spaceAliasToken = new RegExp(SPACE_ALIAS_TOKEN_PATTERN, 'g');
+  const tabToken = new RegExp(TAB_TOKEN_PATTERN, 'g');
   return withDeprecatedFlagged
     .replace(returnToken, NEWLINE_SENTINEL)
-    .replace(spaceAliasToken, SPACE_SENTINEL);
+    .replace(spaceAliasToken, SPACE_SENTINEL)
+    .replace(tabToken, TAB_SENTINEL);
 }
 function restoreWhitespaceTokens(text: string): string {
-  return text.split(NEWLINE_SENTINEL).join(String.fromCharCode(10)).split(SPACE_SENTINEL).join(' ');
+  return text
+    .split(NEWLINE_SENTINEL)
+    .join(String.fromCharCode(10))
+    .split(SPACE_SENTINEL)
+    .join(' ')
+    .split(TAB_SENTINEL)
+    .join(String.fromCharCode(9));
 }
 function applyWhitespaceControl(body: string): string {
   if (body.indexOf('{-{') === -1 && body.indexOf('}-}') === -1) return body;
@@ -1601,6 +1611,7 @@ const ASSIGN_TOKEN = '{{ x = }}';
 const ASSIGN_TOKEN_DOLLAR = '{{ $x = }}';
 const TRIM_BEFORE_SNIPPET = '{-{ product.title }}';
 const TRIM_AFTER_SNIPPET = '{{ product.title }-}';
+const TAB_TOKEN_SNIPPET = '{{ /tab }}';
 type RowKind = 'product' | 'variant' | 'note';
 interface KindedRow {
   row: ProductData;
@@ -3198,24 +3209,242 @@ function registerClick(
   }
   return { isDouble: false, next: { id, at: now } };
 }
+type SearchNode =
+  | { t: 'term'; field: string | null; value: string }
+  | { t: 'and' | 'or'; parts: SearchNode[] }
+  | { t: 'not'; x: SearchNode };
+type SearchToken =
+  | { k: 'open' }
+  | { k: 'close' }
+  | { k: 'op'; v: 'OR' | 'AND' | 'NOT' }
+  | { k: 'term'; field: string | null; value: string; negated: boolean };
+function tokenizeSearch(raw: string): SearchToken[] {
+  const tokens: SearchToken[] = [];
+  let i = 0;
+  const n = raw.length;
+  const readQuoted = (quote: string): string => {
+    const end = raw.indexOf(quote, i + 1);
+    const value = end === -1 ? raw.slice(i + 1) : raw.slice(i + 1, end);
+    i = end === -1 ? n : end + 1;
+    return value;
+  };
+  while (i < n) {
+    const ch = raw[i];
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === '(') {
+      tokens.push({ k: 'open' });
+      i += 1;
+      continue;
+    }
+    if (ch === ')') {
+      tokens.push({ k: 'close' });
+      i += 1;
+      continue;
+    }
+    let negated = false;
+    if (ch === '-' && i + 1 < n && !/\s/.test(raw[i + 1])) {
+      if (raw[i + 1] === '(') {
+        tokens.push({ k: 'op', v: 'NOT' });
+        i += 1;
+        continue;
+      }
+      negated = true;
+      i += 1;
+    }
+    if (raw[i] === '"' || raw[i] === "'") {
+      tokens.push({ k: 'term', field: null, value: readQuoted(raw[i]), negated });
+      continue;
+    }
+    let start = i;
+    while (i < n && !/[\s()]/.test(raw[i])) {
+      if (raw[i] === ':' && (raw[i + 1] === '"' || raw[i + 1] === "'")) break;
+      i += 1;
+    }
+    const word = raw.slice(start, i);
+    if (raw[i] === ':' && (raw[i + 1] === '"' || raw[i + 1] === "'")) {
+      i += 1;
+      tokens.push({ k: 'term', field: word.toLowerCase(), value: readQuoted(raw[i]), negated });
+      continue;
+    }
+    if (!negated && (word === 'OR' || word === 'AND' || word === 'NOT')) {
+      tokens.push({ k: 'op', v: word });
+      continue;
+    }
+    const colon = word.indexOf(':');
+    if (colon > 0 && colon < word.length - 1) {
+      tokens.push({ k: 'term', field: word.slice(0, colon).toLowerCase(), value: word.slice(colon + 1), negated });
+    } else if (word !== '') {
+      tokens.push({ k: 'term', field: null, value: word, negated });
+    } else {
+      start = i;
+      i += 1;
+    }
+  }
+  return tokens;
+}
+function parseSearchQuery(raw: string): SearchNode | null {
+  const tokens = tokenizeSearch(raw);
+  let pos = 0;
+  const peek = (): SearchToken | undefined => tokens[pos];
+  const parseOr = (): SearchNode | null => {
+    const parts: SearchNode[] = [];
+    const first = parseAnd();
+    if (first) parts.push(first);
+    while (peek() && peek()!.k === 'op' && (peek() as { v: string }).v === 'OR') {
+      pos += 1;
+      const next = parseAnd();
+      if (next) parts.push(next);
+    }
+    if (parts.length === 0) return null;
+    return parts.length === 1 ? parts[0] : { t: 'or', parts };
+  };
+  const parseAnd = (): SearchNode | null => {
+    const parts: SearchNode[] = [];
+    for (;;) {
+      const tok = peek();
+      if (!tok || tok.k === 'close' || (tok.k === 'op' && tok.v === 'OR')) break;
+      if (tok.k === 'op' && tok.v === 'AND') {
+        pos += 1;
+        continue;
+      }
+      const unit = parseUnary();
+      if (unit) parts.push(unit);
+    }
+    if (parts.length === 0) return null;
+    return parts.length === 1 ? parts[0] : { t: 'and', parts };
+  };
+  const parseUnary = (): SearchNode | null => {
+    const tok = peek();
+    if (!tok) return null;
+    if (tok.k === 'op' && tok.v === 'NOT') {
+      pos += 1;
+      const inner = parseUnary();
+      return inner ? { t: 'not', x: inner } : null;
+    }
+    if (tok.k === 'open') {
+      pos += 1;
+      const inner = parseOr();
+      if (peek() && peek()!.k === 'close') pos += 1;
+      return inner;
+    }
+    if (tok.k === 'close') {
+      pos += 1;
+      return null;
+    }
+    pos += 1;
+    if (tok.k === 'term') {
+      const term: SearchNode = { t: 'term', field: tok.field, value: tok.value };
+      return tok.negated ? { t: 'not', x: term } : term;
+    }
+    return null;
+  };
+  const tree = parseOr();
+  const rest: SearchNode[] = tree ? [tree] : [];
+  while (pos < tokens.length) {
+    const more = parseOr();
+    if (more) rest.push(more);
+    else pos += 1;
+  }
+  if (rest.length === 0) return null;
+  return rest.length === 1 ? rest[0] : { t: 'and', parts: rest };
+}
+function fieldValues(product: ProductData, field: string): string[] | null {
+  switch (field) {
+    case 'title':
+      return [product.title];
+    case 'handle':
+      return [product.handle];
+    case 'vendor':
+      return [product.vendor];
+    case 'product_type':
+    case 'producttype':
+    case 'type':
+      return [product.productType];
+    case 'tag':
+      return product.tags;
+    case 'sku':
+      return product.variants.map((v) => v.sku || '').filter(Boolean);
+    case 'barcode':
+      return product.variants.map((v) => v.barcode || '').filter(Boolean);
+    case 'status':
+      return [product.status];
+    default: {
+      const m = /^metafields?\.([^.]+)\.(.+)$/.exec(field);
+      if (m) return product.metafields.filter((mf) => mf.namespace.toLowerCase() === m[1] && mf.key.toLowerCase() === m[2]).map((mf) => mf.value);
+      return null;
+    }
+  }
+}
+function plainHaystacks(product: ProductData): string[] {
+  const hay: string[] = [product.title, product.handle, product.vendor, product.productType, product.note || '', ...product.tags];
+  for (const variant of product.variants) if (variant.sku) hay.push(variant.sku);
+  for (const mf of product.metafields) if (mf.value) hay.push(mf.value);
+  return hay;
+}
+const EXACT_FIELDS = new Set(['vendor', 'product_type', 'producttype', 'type', 'tag', 'status']);
+function matchesSearchNode(product: ProductData, node: SearchNode): boolean {
+  switch (node.t) {
+    case 'and':
+      return node.parts.every((p) => matchesSearchNode(product, p));
+    case 'or':
+      return node.parts.some((p) => matchesSearchNode(product, p));
+    case 'not':
+      return !matchesSearchNode(product, node.x);
+    default: {
+      const needle = node.value.toLowerCase();
+      if (node.field === null) {
+        if (needle === '') return true;
+        return plainHaystacks(product).some((h) => (h || '').toLowerCase().includes(needle));
+      }
+      const values = fieldValues(product, node.field);
+      if (values === null) return false;
+      if (EXACT_FIELDS.has(node.field)) return values.some((v) => (v || '').toLowerCase() === needle);
+      return values.some((v) => (v || '').toLowerCase().includes(needle));
+    }
+  }
+}
+const parsedCache = new Map<string, SearchNode | null>();
+function matchesSearchQuery(product: ProductData, raw: string): boolean {
+  let node = parsedCache.get(raw);
+  if (node === undefined) {
+    node = parseSearchQuery(raw);
+    parsedCache.set(raw, node);
+    if (parsedCache.size > 64) parsedCache.delete(parsedCache.keys().next().value as string);
+  }
+  return node === null ? true : matchesSearchNode(product, node);
+}
+const MAX_PASTED_TERMS = 50;
+const SEARCH_DEBOUNCE_MS = 350;
+function quoteSearchTerm(term: string): string {
+  const clean = term.replace(/"/g, '');
+  if (/[\s():'\\]/.test(clean) || clean.startsWith('-') || clean === 'OR' || clean === 'AND' || clean === 'NOT') return `"${clean}"`;
+  return clean;
+}
+function hasColumnSeparators(text: string): boolean {
+  return /[\r\n\t]/.test(text);
+}
+function columnToOrQuery(pasted: string): { query: string; count: number; truncated: boolean } | null {
+  if (!hasColumnSeparators(pasted)) return null;
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (let cell of pasted.split(/\r\n|\n|\r|\t/)) {
+    cell = cell.trim();
+    if (cell.length >= 2 && cell.startsWith('"') && cell.endsWith('"')) cell = cell.slice(1, -1).replace(/""/g, '"').trim();
+    if (cell === '') continue;
+    const key = cell.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    terms.push(cell);
+  }
+  const truncated = terms.length > MAX_PASTED_TERMS;
+  const used = terms.slice(0, MAX_PASTED_TERMS);
+  return { query: used.map(quoteSearchTerm).join(' OR '), count: used.length, truncated };
+}
 function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
-  const query = rawQuery.trim().toLowerCase();
-  if (query === '') return true;
-  const haystacks: string[] = [
-    product.title,
-    product.handle,
-    product.vendor,
-    product.productType,
-    product.note || '',
-    ...product.tags,
-  ];
-  for (const variant of product.variants) {
-    if (variant.sku) haystacks.push(variant.sku);
-  }
-  for (const mf of product.metafields) {
-    if (mf.value) haystacks.push(mf.value);
-  }
-  return haystacks.some((h) => (h || '').toLowerCase().includes(query));
+  return matchesSearchQuery(product, rawQuery);
 }
 const ITALIC_UPPER_BASE = 0x1d434;
 const ITALIC_LOWER_BASE = 0x1d44e;
@@ -3371,6 +3600,7 @@ the equivalent letters: dd, MM, yyyy, ddd, MMM, yy).
 ---------------------
 {{ /return }}   A real line break
 {{ /space }}    A single space
+{{ /tab }}      A tab character (for tab-separated .tsv output)
 
 Use these when you need whitespace somewhere that would otherwise get trimmed, such as
 inside a wrap block's delineator (see section 12).
@@ -3705,12 +3935,51 @@ Example: a global titled "signature" with value "Thanks for shopping with us!" -
 {{ $global:signature }} in any template outputs "Thanks for shopping with us!" wherever it's placed.
 
 
+15. SEARCHING PRODUCTS (the search box on the main page)
+---------------------------------------------------------
+The search runs as you type (after a short pause), and again when you press Search or leave
+the box. It combines Shopify's own product search with the products this app has already
+loaded this session (so a word that only appears in a metafield value is found too).
+
+  red mug               AND -- a space means both words must match
+  red AND mug           the same thing; AND is optional
+  red OR blue           OR -- either word (write OR in capital letters)
+  -sale                 NOT -- leave out products that match "sale"
+  NOT sale              the same thing
+  "red mug"             an exact phrase (single quotes work too)
+  (red OR blue) mug     parentheses group, so this is (red or blue) AND mug
+  red OR blue -sale     = (red) OR (blue AND NOT sale) -- AND binds tighter than OR; use
+                        parentheses when you mean something else: (red OR blue) -sale
+
+A plain word matches if it appears anywhere in the title, handle, vendor, product type,
+tags, SKUs, the product's note or ANY metafield value. Case does not matter.
+
+Field filters narrow a word to one field:
+  title:mug  handle:red-mug  sku:ABC-1  barcode:123  (contains the text)
+  vendor:"Acme Co"  product_type:Mug  tag:sale  status:active  (the whole value, any case)
+  metafields.custom.location:"Shelf A4"  (a metafield, by namespace.key)
+Other Shopify filters (for example collection_id:123, inventory_total:>0, created_at:>2026-01-01)
+are applied by Shopify itself; they work in the search box, but products found only through the
+app's own metafield matching are not checked against them.
+
+Pasting a column from Excel or Google Sheets: copy the cells and paste them into the search
+box. The box turns them into an OR search, exactly as if you had typed it:
+  a / b / c (three cells)   ->   a OR b OR c
+Cells containing spaces are put in quotes, blank and repeated cells are dropped, and at most
+50 values are used (a note appears under the box if some were left out). Copying one cell, or
+a row (tab-separated cells), works too.
+
+Tips: to search several metafields at once, just list the words (red mug) or use OR between
+alternatives. Product notes you typed into the selection are searched as well.
+
+
 QUICK REFERENCE
 -----------------
 {{ product.FIELD }}                     {{ variant.FIELD }}
 {{ product.metafield.NS.KEY }}          {{ product.note }}
 {{ time=MM/dd/yyyy }}  {{ time=h:mm tt }}  {{ time=dddd, MMMM d, yyyy }}
-{{ primaryDomain }}                     {{ /return }} {{ /space }}
+{{ primaryDomain }}                     {{ /return }} {{ /space }} {{ /tab }}
+{-{ ... }}  {{ ... }-}                  (trim the newline before / after a tag)
 {{ x = VALUE }}  {{ x }}                {{ = EXPR }}
 {{ $x = VALUE }}  {{ $x }}              (collision-safe variable form)
 {{ $global:NAME }}                      (read-only, defined in Settings > Global Vars)
@@ -3740,6 +4009,8 @@ function Extension() {
   const [products, setProducts] = useState<ProductData[]>([]);
   const [productSearch, setProductSearch] = useState('');
   const [appliedSearch, setAppliedSearch] = useState('');
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [searchNotice, setSearchNotice] = useState<string | null>(null);
   const [productPageInfo, setProductPageInfo] = useState<PageInfo | null>(null);
   const [productsLoading, setProductsLoading] = useState(false);
   const [productError, setProductError] = useState<string | null>(null);
@@ -4278,10 +4549,46 @@ function Extension() {
     };
     init();
   }, []);
-  const runSearch = (): void => {
-    setAppliedSearch(productSearch);
-    fetchProducts(null, 'forward', productSearch);
+  const applySearchNow = (text: string): void => {
+    if (searchTimerRef.current !== null) {
+      clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = null;
+    }
+    setAppliedSearch(text);
+    fetchProducts(null, 'forward', text);
   };
+  const runSearch = (): void => {
+    applySearchNow(productSearch);
+  };
+  const handleSearchInput = (raw: string): void => {
+    if (hasColumnSeparators(raw)) {
+      const converted = columnToOrQuery(raw);
+      const text = converted ? converted.query : raw.trim();
+      setSearchNotice(
+        converted && converted.truncated
+          ? `Only the first ${MAX_PASTED_TERMS} pasted values were used.`
+          : converted && converted.count > 1
+            ? `${converted.count} pasted values combined with OR.`
+            : null,
+      );
+      setProductSearch(text);
+      applySearchNow(text);
+      return;
+    }
+    setSearchNotice(null);
+    setProductSearch(raw);
+    if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      searchTimerRef.current = null;
+      applySearchNow(raw);
+    }, SEARCH_DEBOUNCE_MS);
+  };
+  useEffect(
+    () => () => {
+      if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
+    },
+    [],
+  );
   const handleNextProducts = (): void => {
     if (productPageInfo?.hasNextPage) {
       fetchProducts(productPageInfo.endCursor, 'forward', appliedSearch);
@@ -4585,6 +4892,7 @@ function Extension() {
               <s-section heading="Special tokens">
                 <s-button onClick={() => onInsert(NEWLINE_TOKEN_SNIPPET)}>New line</s-button>
                 <s-button onClick={() => onInsert(SPACE_TOKEN_SNIPPET)}>Space</s-button>
+                <s-button onClick={() => onInsert(TAB_TOKEN_SNIPPET)}>Tab</s-button>
                 <s-button onClick={() => onInsert(TRIM_BEFORE_SNIPPET)}>
                   Trim newline before a tag
                 </s-button>
@@ -6286,18 +6594,19 @@ function Extension() {
               </s-stack>
               
               <s-grid gridTemplateColumns="1fr auto" gap="small" alignItems="end">
-                <s-text-field
+                <s-text-area
                   label="Search products"
                   labelAccessibilityVisibility="exclusive"
-                  icon="search"
                   autocomplete="off"
-                  placeholder="Search title, handle, tag, SKU, metafield…"
+                  rows={productSearch.length > 80 ? 3 : 1}
+                  placeholder='Search title, handle, tag, SKU, metafield…  (red OR blue, -sale, "exact phrase")'
                   value={productSearch}
-                  onInput={(e: any) => setProductSearch(e.currentTarget.value)}
+                  onInput={(e: any) => handleSearchInput(e.currentTarget.value)}
                   onChange={runSearch}
                 />
                 <s-button onClick={runSearch}>Search</s-button>
               </s-grid>
+              {searchNotice ? <s-text color="subdued">{searchNotice}</s-text> : null}
               <s-stack
                 direction="inline"
                 gap="base"

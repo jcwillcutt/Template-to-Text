@@ -237,6 +237,8 @@ export const CLOSE = BACKSLASH + '}' + BACKSLASH + '}';
 export const RETURN_TOKEN_PATTERN = OPEN + WS + '/return' + WS + CLOSE;
 
 export const SPACE_ALIAS_TOKEN_PATTERN = OPEN + WS + '/space' + WS + CLOSE;
+// `{{ /tab }}` -> a real tab character (U+0009), e.g. for TSV output; survives trimming like /return and /space.
+export const TAB_TOKEN_PATTERN = OPEN + WS + '/tab' + WS + CLOSE;
 
 // RETIRED (session 7), per explicit direction -- kept only so applyWhitespaceTokens can still
 // DETECT the old spelling and flag it as deprecated, rather than letting it fall through to the
@@ -253,6 +255,7 @@ export const SPACE_TOKEN_PATTERN = OPEN + WS + BACKSLASH + BACKSLASH + 't' + WS 
 export const NEWLINE_SENTINEL = String.fromCharCode(1);
 
 export const SPACE_SENTINEL = String.fromCharCode(2);
+export const TAB_SENTINEL = String.fromCharCode(5);
 
 // `{{ break }}` / `{{ skip }}` (added session 6, loop redesign) -- like the whitespace sentinels
 // above, these are non-printable control characters (U+0003 / U+0004) that can never appear in a
@@ -299,15 +302,23 @@ export function applyWhitespaceTokens(body: string): string {
     .replace(new RegExp(SPACE_TOKEN_PATTERN, 'g'), deprecatedSpace);
   const returnToken = new RegExp(RETURN_TOKEN_PATTERN, 'g');
   const spaceAliasToken = new RegExp(SPACE_ALIAS_TOKEN_PATTERN, 'g');
+  const tabToken = new RegExp(TAB_TOKEN_PATTERN, 'g');
   return withDeprecatedFlagged
     .replace(returnToken, NEWLINE_SENTINEL)
-    .replace(spaceAliasToken, SPACE_SENTINEL);
+    .replace(spaceAliasToken, SPACE_SENTINEL)
+    .replace(tabToken, TAB_SENTINEL);
 }
 
 export function restoreWhitespaceTokens(text: string): string {
   // Turn the whitespace sentinels back into real characters. Runs as the LAST step, after wrapping,
   // so nothing downstream can strip them.
-  return text.split(NEWLINE_SENTINEL).join(String.fromCharCode(10)).split(SPACE_SENTINEL).join(' ');
+  return text
+    .split(NEWLINE_SENTINEL)
+    .join(String.fromCharCode(10))
+    .split(SPACE_SENTINEL)
+    .join(' ')
+    .split(TAB_SENTINEL)
+    .join(String.fromCharCode(9));
 }
 
 // Whitespace control, in analogy with Liquid's `{%- -%}`: `{-{` removes the newline BEFORE the tag (and any

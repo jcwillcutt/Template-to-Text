@@ -116,6 +116,22 @@ describe('whitespace and comments', () => {
   it('/return and /space', () => {
     expect(render('a{{ /return }}b{{ /space }}c{{/return}}d', { products: [p] })).toBe('a\nb c\nd');
   });
+  it('/tab is a real tab character, in any spelling of the braces', () => {
+    expect(render('a{{ /tab }}b{{/tab}}c{{  /tab  }}d', { products: [p] })).toBe('a\tb\tc\td');
+  });
+  it('/tab survives trimming (assignments, replace/wrap delineators) like /return and /space', () => {
+    expect(render('{{ x = {{ /tab }} }}[{{ x }}]', { products: [p] })).toBe('[\t]');
+    expect(render('{{ #replace=-, replacement={{ /tab }} }}a-b{{/replace}}', { products: [p] })).toBe('a\tb');
+    expect(render('{{ #repeat=3, delineator={{ /tab }} }}x{{/repeat}}', { products: [p] })).toBe('x\tx\tx');
+    expect(render('{{#wrap=3, hard=TRUE, delineator={{ /tab }}}}abcdef{{/wrap}}', { products: [p] })).toBe('abc\tdef');
+  });
+  it('builds a TSV row', () => {
+    const body = '{{ product.handle }}{{ /tab }}{{ product.vendor }}{{ /tab }}{{ product.totalInventory }}{{ /return }}';
+    expect(render(body, { products: [p] })).toBe('product-7\tAcme Co\t14\n');
+  });
+  it('the retired backslash-t spelling is still flagged, not turned into a tab', () => {
+    expect(render('a{{ \\t }}b', { products: [p] })).toContain('retired');
+  });
   it('comments are removed, including multi-line and several', () => {
     expect(render('a{{ #comment }}x\ny{{ /comment }}b{{#comment}}z{{/comment}}c', { products: [p] })).toBe('abc');
   });

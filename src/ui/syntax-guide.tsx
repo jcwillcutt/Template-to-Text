@@ -106,6 +106,7 @@ the equivalent letters: dd, MM, yyyy, ddd, MMM, yy).
 ---------------------
 {{ /return }}   A real line break
 {{ /space }}    A single space
+{{ /tab }}      A tab character (for tab-separated .tsv output)
 
 Use these when you need whitespace somewhere that would otherwise get trimmed, such as
 inside a wrap block's delineator (see section 12).
@@ -440,12 +441,51 @@ Example: a global titled "signature" with value "Thanks for shopping with us!" -
 {{ $global:signature }} in any template outputs "Thanks for shopping with us!" wherever it's placed.
 
 
+15. SEARCHING PRODUCTS (the search box on the main page)
+---------------------------------------------------------
+The search runs as you type (after a short pause), and again when you press Search or leave
+the box. It combines Shopify's own product search with the products this app has already
+loaded this session (so a word that only appears in a metafield value is found too).
+
+  red mug               AND -- a space means both words must match
+  red AND mug           the same thing; AND is optional
+  red OR blue           OR -- either word (write OR in capital letters)
+  -sale                 NOT -- leave out products that match "sale"
+  NOT sale              the same thing
+  "red mug"             an exact phrase (single quotes work too)
+  (red OR blue) mug     parentheses group, so this is (red or blue) AND mug
+  red OR blue -sale     = (red) OR (blue AND NOT sale) -- AND binds tighter than OR; use
+                        parentheses when you mean something else: (red OR blue) -sale
+
+A plain word matches if it appears anywhere in the title, handle, vendor, product type,
+tags, SKUs, the product's note or ANY metafield value. Case does not matter.
+
+Field filters narrow a word to one field:
+  title:mug  handle:red-mug  sku:ABC-1  barcode:123  (contains the text)
+  vendor:"Acme Co"  product_type:Mug  tag:sale  status:active  (the whole value, any case)
+  metafields.custom.location:"Shelf A4"  (a metafield, by namespace.key)
+Other Shopify filters (for example collection_id:123, inventory_total:>0, created_at:>2026-01-01)
+are applied by Shopify itself; they work in the search box, but products found only through the
+app's own metafield matching are not checked against them.
+
+Pasting a column from Excel or Google Sheets: copy the cells and paste them into the search
+box. The box turns them into an OR search, exactly as if you had typed it:
+  a / b / c (three cells)   ->   a OR b OR c
+Cells containing spaces are put in quotes, blank and repeated cells are dropped, and at most
+50 values are used (a note appears under the box if some were left out). Copying one cell, or
+a row (tab-separated cells), works too.
+
+Tips: to search several metafields at once, just list the words (red mug) or use OR between
+alternatives. Product notes you typed into the selection are searched as well.
+
+
 QUICK REFERENCE
 -----------------
 {{ product.FIELD }}                     {{ variant.FIELD }}
 {{ product.metafield.NS.KEY }}          {{ product.note }}
 {{ time=MM/dd/yyyy }}  {{ time=h:mm tt }}  {{ time=dddd, MMMM d, yyyy }}
-{{ primaryDomain }}                     {{ /return }} {{ /space }}
+{{ primaryDomain }}                     {{ /return }} {{ /space }} {{ /tab }}
+{-{ ... }}  {{ ... }-}                  (trim the newline before / after a tag)
 {{ x = VALUE }}  {{ x }}                {{ = EXPR }}
 {{ $x = VALUE }}  {{ $x }}              (collision-safe variable form)
 {{ $global:NAME }}                      (read-only, defined in Settings > Global Vars)

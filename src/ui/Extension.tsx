@@ -21,6 +21,9 @@ function Extension() {
   const [products, setProducts] = useState<ProductData[]>([]);
   const [productSearch, setProductSearch] = useState('');
   const [appliedSearch, setAppliedSearch] = useState('');
+  // Live search: typing re-runs the search after a short pause. `searchNotice` explains a pasted column.
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [searchNotice, setSearchNotice] = useState<string | null>(null);
   const [productPageInfo, setProductPageInfo] = useState<PageInfo | null>(null);
   const [productsLoading, setProductsLoading] = useState(false);
   const [productError, setProductError] = useState<string | null>(null);
@@ -768,10 +771,53 @@ function Extension() {
     init();
   }, []);
 
-  const runSearch = (): void => {
-    setAppliedSearch(productSearch);
-    fetchProducts(null, 'forward', productSearch);
+  // Run a search right now (cancelling any pending typed search).
+  const applySearchNow = (text: string): void => {
+    if (searchTimerRef.current !== null) {
+      clearTimeout(searchTimerRef.current);
+      searchTimerRef.current = null;
+    }
+    setAppliedSearch(text);
+    fetchProducts(null, 'forward', text);
   };
+
+  const runSearch = (): void => {
+    applySearchNow(productSearch);
+  };
+
+  // The search box is a multi-line field so a pasted spreadsheet column keeps its line breaks. A paste with line
+  // breaks or tabs is rewritten to `a OR b OR c` -- exactly what typing the OR statement by hand would give -- and
+  // searched immediately. Ordinary typing searches after a short pause, so every keystroke does not hit Shopify.
+  const handleSearchInput = (raw: string): void => {
+    if (hasColumnSeparators(raw)) {
+      const converted = columnToOrQuery(raw);
+      const text = converted ? converted.query : raw.trim();
+      setSearchNotice(
+        converted && converted.truncated
+          ? `Only the first ${MAX_PASTED_TERMS} pasted values were used.`
+          : converted && converted.count > 1
+            ? `${converted.count} pasted values combined with OR.`
+            : null,
+      );
+      setProductSearch(text);
+      applySearchNow(text);
+      return;
+    }
+    setSearchNotice(null);
+    setProductSearch(raw);
+    if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      searchTimerRef.current = null;
+      applySearchNow(raw);
+    }, SEARCH_DEBOUNCE_MS);
+  };
+
+  useEffect(
+    () => () => {
+      if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
+    },
+    [],
+  );
 
   const handleNextProducts = (): void => {
     if (productPageInfo?.hasNextPage) {
@@ -1158,6 +1204,7 @@ function Extension() {
               <s-section heading="Special tokens">
                 <s-button onClick={() => onInsert(NEWLINE_TOKEN_SNIPPET)}>New line</s-button>
                 <s-button onClick={() => onInsert(SPACE_TOKEN_SNIPPET)}>Space</s-button>
+                <s-button onClick={() => onInsert(TAB_TOKEN_SNIPPET)}>Tab</s-button>
                 <s-button onClick={() => onInsert(TRIM_BEFORE_SNIPPET)}>
                   Trim newline before a tag
                 </s-button>
@@ -3233,22 +3280,22 @@ function Extension() {
                   </s-menu>
                 </s-stack>
               </s-stack>
-              {/* A plain text field (not a search field) is used here so long queries scroll and
-                  keep the caret at the end on mobile. Autocomplete is off and the merchant can
-                  submit explicitly with the Search button instead of relying on the change event. */}
+              {/* A multi-line text area (not a single-line field): browsers strip or flatten line breaks when
+                  pasting into a one-line input, which would lose the rows of a pasted spreadsheet column. */}
               <s-grid gridTemplateColumns="1fr auto" gap="small" alignItems="end">
-                <s-text-field
+                <s-text-area
                   label="Search products"
                   labelAccessibilityVisibility="exclusive"
-                  icon="search"
                   autocomplete="off"
-                  placeholder="Search title, handle, tag, SKU, metafield…"
+                  rows={productSearch.length > 80 ? 3 : 1}
+                  placeholder='Search title, handle, tag, SKU, metafield…  (red OR blue, -sale, "exact phrase")'
                   value={productSearch}
-                  onInput={(e: any) => setProductSearch(e.currentTarget.value)}
+                  onInput={(e: any) => handleSearchInput(e.currentTarget.value)}
                   onChange={runSearch}
                 />
                 <s-button onClick={runSearch}>Search</s-button>
               </s-grid>
+              {searchNotice ? <s-text color="subdued">{searchNotice}</s-text> : null}
               <s-stack
                 direction="inline"
                 gap="base"
