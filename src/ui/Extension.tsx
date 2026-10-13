@@ -777,8 +777,10 @@ function Extension() {
       clearTimeout(searchTimerRef.current);
       searchTimerRef.current = null;
     }
-    setAppliedSearch(text);
-    fetchProducts(null, 'forward', text);
+    // The box may end with a dangling `OR` (ready for the next scan); the search itself never sees it.
+    const effective = searchQueryForShopify(text);
+    setAppliedSearch(effective);
+    fetchProducts(null, 'forward', effective);
   };
 
   const runSearch = (): void => {
@@ -786,8 +788,9 @@ function Extension() {
   };
 
   // The search box is a multi-line field so a pasted spreadsheet column keeps its line breaks. A paste with line
-  // breaks or tabs is rewritten to `a OR b OR c` -- exactly what typing the OR statement by hand would give -- and
-  // searched immediately. Ordinary typing searches after a short pause, so every keystroke does not hit Shopify.
+  // breaks (or a scanner's Enter) is rewritten to `a OR b OR c` -- exactly what typing the OR statement by hand
+  // would give -- and searched immediately. There is deliberately NO search on blur: the first click on a product
+  // blurs the box, and a search starting at that moment reloads the list under the click and swallows it. Ordinary typing searches after a short pause, so every keystroke does not hit Shopify.
   const handleSearchInput = (raw: string): void => {
     if (hasColumnSeparators(raw)) {
       const converted = columnToOrQuery(raw);
@@ -3291,7 +3294,6 @@ function Extension() {
                   placeholder='Search title, handle, tag, SKU, metafield…  (red OR blue, -sale, "exact phrase")'
                   value={productSearch}
                   onInput={(e: any) => handleSearchInput(e.currentTarget.value)}
-                  onChange={runSearch}
                 />
                 <s-button onClick={runSearch}>Search</s-button>
               </s-grid>

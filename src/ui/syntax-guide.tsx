@@ -469,11 +469,17 @@ are applied by Shopify itself; they work in the search box, but products found o
 app's own metafield matching are not checked against them.
 
 Pasting a column from Excel or Google Sheets: copy the cells and paste them into the search
-box. The box turns them into an OR search, exactly as if you had typed it:
+box. Each line becomes one alternative, exactly as if you had typed the OR search yourself:
   a / b / c (three cells)   ->   a OR b OR c
 Cells containing spaces are put in quotes, blank and repeated cells are dropped, and at most
-50 values are used (a note appears under the box if some were left out). Copying one cell, or
-a row (tab-separated cells), works too.
+50 values are used (a note appears under the box if some were left out). Only line breaks
+separate values -- tabs do not.
+
+Barcode scanners: a scanner types the code and then presses Enter. Each Enter adds " OR " after
+the code, ready for the next scan, so scanning three items gives:
+  0123456789 OR 9876543210 OR 5551234567 OR
+The search ignores the trailing OR, so results update after every scan. Pressing Enter after
+typing a normal search does the same (it just adds a trailing OR you can type over).
 
 Tips: to search several metafields at once, just list the words (red mug) or use OR between
 alternatives. Product notes you typed into the selection are searched as well.

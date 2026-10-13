@@ -6,6 +6,7 @@ import {
   matchesSearchQuery,
   parseSearchQuery,
   quoteSearchTerm,
+  searchQueryForShopify,
 } from '../../src/ui/search-query';
 import { makeProduct } from '../helpers/fixtures';
 
@@ -147,52 +148,101 @@ describe('never throws, always terminates', () => {
   });
 });
 
-describe('pasting a spreadsheet column', () => {
-  it('is only converted when the text has line breaks or tabs', () => {
+describe('line breaks become OR (pasted column, barcode scanner, Enter)', () => {
+  it('is only applied when the text contains a line break; tabs are not separators', () => {
     expect(hasColumnSeparators('red mug')).toBe(false);
     expect(columnToOrQuery('red mug')).toBeNull();
     expect(hasColumnSeparators('a\nb')).toBe(true);
-    expect(hasColumnSeparators('a\tb')).toBe(true);
+    expect(hasColumnSeparators('a\r\nb')).toBe(true);
+    expect(hasColumnSeparators('a\tb')).toBe(false);
+    expect(columnToOrQuery('a\tb\tc')).toBeNull();
   });
-  it('a column becomes a OR b OR c (Excel / Google Sheets / Windows and Mac line endings)', () => {
-    expect(columnToOrQuery('a\nb\nc')?.query).toBe('a OR b OR c');
-    expect(columnToOrQuery('a\r\nb\r\nc\r\n')?.query).toBe('a OR b OR c');
-    expect(columnToOrQuery('a\rb\rc')?.query).toBe('a OR b OR c');
+
+  describe('a scanner: type the code, then Enter, repeatedly', () => {
+    // Simulates the search box: the box content after each keystroke/scan goes through columnToOrQuery.
+    const scan = (box: string, code: string): string => {
+      const typed = box + code + '\n';
+      return columnToOrQuery(typed)?.query ?? typed;
+    };
+    it('each Enter leaves " OR " ready for the next scan, so scans never run together', () => {
+      let box = '';
+      box = scan(box, '0123456789');
+      expect(box).toBe('0123456789 OR ');
+      box = scan(box, '9876543210');
+      expect(box).toBe('0123456789 OR 9876543210 OR ');
+      box = scan(box, '5551234567');
+      expect(box).toBe('0123456789 OR 9876543210 OR 5551234567 OR ');
+    });
+    it('works with Windows line endings and carriage-return-only scanners', () => {
+      expect(columnToOrQuery('ABC\r\n')?.query).toBe('ABC OR ');
+      expect(columnToOrQuery('ABC\r')?.query).toBe('ABC OR ');
+    });
+    it('the finished box searches for exactly the scanned codes', () => {
+      const box = scan(scan(scan('', 'MUG-001'), 'PLT-002'), 'nothing');
+      expect(matchesSearchQuery(mug, box)).toBe(true);
+      expect(matchesSearchQuery(plate, box)).toBe(true);
+      expect(matchesSearchQuery(makeProduct(9, { title: 'Green', handle: 'green' }), box)).toBe(false);
+    });
+    it('Shopify never sees the dangling OR', () => {
+      expect(searchQueryForShopify('a OR b OR ')).toBe('a OR b');
+      expect(searchQueryForShopify('a OR b OR  OR ')).toBe('a OR b');
+      expect(searchQueryForShopify('a')).toBe('a');
+      expect(searchQueryForShopify(' OR ')).toBe('');
+      expect(searchQueryForShopify('')).toBe('');
+      expect(searchQueryForShopify('red AND ')).toBe('red');
+    });
+    it('a dangling OR does not change what matches locally', () => {
+      expect(matchesSearchQuery(mug, 'MUG-001 OR ')).toBe(true);
+      expect(matchesSearchQuery(plate, 'MUG-001 OR ')).toBe(false);
+    });
+    it('Enter on an ordinary typed search keeps the words as typed and just adds the OR', () => {
+      expect(columnToOrQuery('red mug\n')?.query).toBe('red mug OR ');
+    });
+    it('Enter on an empty box clears it', () => {
+      expect(columnToOrQuery('\n')?.query).toBe('');
+      expect(columnToOrQuery('  \r\n')?.count).toBe(0);
+    });
   });
-  it('a row of cells (tabs) works the same way', () => {
-    expect(columnToOrQuery('a\tb\tc')?.query).toBe('a OR b OR c');
+
+  describe('a pasted column', () => {
+    it('becomes a OR b OR c (Windows, Mac and Unix line endings)', () => {
+      expect(columnToOrQuery('a\nb\nc')?.query).toBe('a OR b OR c');
+      expect(columnToOrQuery('a\r\nb\r\nc')?.query).toBe('a OR b OR c');
+      expect(columnToOrQuery('a\rb\rc')?.query).toBe('a OR b OR c');
+    });
+    it('a trailing line break (Excel adds one) keeps a trailing OR so scanning can continue', () => {
+      expect(columnToOrQuery('a\r\nb\r\nc\r\n')?.query).toBe('a OR b OR c OR ');
+    });
+    it('drops blank cells and duplicates (case-insensitive), keeping the first order', () => {
+      expect(columnToOrQuery('a\n\nB\nb\n  \nA\nc')?.query).toBe('a OR B OR c');
+    });
+    it('trims cells and removes the quotes spreadsheets add around special cells', () => {
+      expect(columnToOrQuery('  a  \n"b ""x"" c"\nd')?.query).toBe('a OR "b x c" OR d');
+      expect(columnToOrQuery('"red mug"\nblue')?.query).toBe('"red mug" OR blue');
+    });
+    it('quotes values that contain spaces or syntax so they stay one term', () => {
+      expect(columnToOrQuery('red mug\nblue plate')?.query).toBe('"red mug" OR "blue plate"');
+      expect(columnToOrQuery('a:b\n(x)\n-y\nOR\nplain')?.query).toBe('"a:b" OR "(x)" OR "-y" OR "OR" OR plain');
+    });
+    it('pasting a column after scans already in the box keeps them', () => {
+      expect(columnToOrQuery('A OR B OR x\ny\nz')?.query).toBe('A OR B OR x OR y OR z');
+    });
+    it('the converted text matches exactly what the OR of the values matches', () => {
+      const out = columnToOrQuery('Red Mug\nPLT-002\nnothing-here')!.query;
+      expect(matchesSearchQuery(mug, out)).toBe(true);
+      expect(matchesSearchQuery(plate, out)).toBe(true);
+      expect(matchesSearchQuery(makeProduct(3, { title: 'Green Cup', handle: 'green-cup' }), out)).toBe(false);
+    });
+    it('is capped so a huge paste cannot produce an oversized query', () => {
+      const big = Array.from({ length: 200 }, (_, i) => `SKU-${i}`).join('\n');
+      const r = columnToOrQuery(big)!;
+      expect(r.count).toBe(MAX_PASTED_TERMS);
+      expect(r.truncated).toBe(true);
+      expect(r.query.split(' OR ')).toHaveLength(MAX_PASTED_TERMS);
+      expect(columnToOrQuery('a\nb')!.truncated).toBe(false);
+    });
   });
-  it('a single copied cell (with the trailing newline Excel adds) is just that value, with no OR', () => {
-    expect(columnToOrQuery('SKU-1\r\n')?.query).toBe('SKU-1');
-    expect(columnToOrQuery('SKU-1\r\n')?.count).toBe(1);
-  });
-  it('drops blank cells and duplicates (case-insensitive), keeping the first order', () => {
-    expect(columnToOrQuery('a\n\nB\nb\n  \nA\nc')?.query).toBe('a OR B OR c');
-  });
-  it('trims cells and removes the quotes spreadsheets add around special cells', () => {
-    expect(columnToOrQuery('  a  \n"b ""x"" c"\n')?.query).toBe('a OR "b x c"');
-  });
-  it('quotes values that contain spaces or syntax so they stay one term', () => {
-    expect(columnToOrQuery('red mug\nblue plate')?.query).toBe('"red mug" OR "blue plate"');
-    expect(columnToOrQuery('a:b\n(x)\n-y\nOR\nplain')?.query).toBe('"a:b" OR "(x)" OR "-y" OR "OR" OR plain');
-  });
-  it('the converted text, once parsed, matches exactly what the OR of the values matches', () => {
-    const out = columnToOrQuery('Red Mug\nPLT-002\nnothing-here')!.query;
-    expect(matchesSearchQuery(mug, out)).toBe(true);
-    expect(matchesSearchQuery(plate, out)).toBe(true);
-    expect(matchesSearchQuery(makeProduct(3, { title: 'Green Cup', handle: 'green-cup' }), out)).toBe(false);
-  });
-  it('is capped so a huge paste cannot produce an oversized query', () => {
-    const big = Array.from({ length: 200 }, (_, i) => `SKU-${i}`).join('\n');
-    const r = columnToOrQuery(big)!;
-    expect(r.count).toBe(MAX_PASTED_TERMS);
-    expect(r.truncated).toBe(true);
-    expect(r.query.split(' OR ')).toHaveLength(MAX_PASTED_TERMS);
-    expect(columnToOrQuery('a\nb')!.truncated).toBe(false);
-  });
-  it('an empty paste converts to an empty query', () => {
-    expect(columnToOrQuery('\n\n')?.query).toBe('');
-  });
+
   it('quoteSearchTerm leaves ordinary values alone', () => {
     expect(quoteSearchTerm('ABC-123')).toBe('ABC-123');
     expect(quoteSearchTerm('12345')).toBe('12345');

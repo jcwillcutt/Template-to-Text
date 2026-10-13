@@ -258,27 +258,52 @@ export function quoteSearchTerm(term: string): string {
   return clean;
 }
 
+// Only line breaks separate values. (A barcode scanner types the code and then Enter; a spreadsheet column copies as
+// lines.) Tabs are NOT separators.
 export function hasColumnSeparators(text: string): boolean {
-  return /[\r\n\t]/.test(text);
+  return /[\r\n]/.test(text);
 }
 
-// Spreadsheets copy a column as lines (a row as tab-separated cells). Turn that into an OR query, exactly as if the
-// merchant had typed `a OR b OR c`. Returns null when the text has no line breaks or tabs (ordinary typing).
-export function columnToOrQuery(pasted: string): { query: string; count: number; truncated: boolean } | null {
-  if (!hasColumnSeparators(pasted)) return null;
-  const seen = new Set<string>();
-  const terms: string[] = [];
-  for (let cell of pasted.split(/\r\n|\n|\r|\t/)) {
+const OPERATOR_IN_TEXT = /\s(OR|AND)\s|\s(OR|AND)$|^NOT\s/;
+
+// Turn text containing line breaks into an OR query, exactly as if the merchant had typed `a OR b OR c`:
+//  * a scanner (or Enter): `<what is in the box> + scan + Enter` is ONE line; it is kept as typed and ` OR ` is
+//    appended, ready for the next scan;
+//  * a pasted column (several lines): each line becomes one alternative (values with spaces are quoted, blanks and
+//    repeats are dropped); if the paste ends with a line break (Excel does this) a trailing ` OR ` is kept too.
+// Returns null when the text has no line break (ordinary typing).
+export function columnToOrQuery(raw: string): { query: string; count: number; truncated: boolean } | null {
+  if (!hasColumnSeparators(raw)) return null;
+  const endsWithBreak = /[\r\n]\s*$/.test(raw);
+  const lines: string[] = [];
+  for (let cell of raw.split(/\r\n|\n|\r/)) {
     cell = cell.trim();
     // A spreadsheet wraps cells containing quotes/newlines in double quotes and doubles inner quotes.
-    if (cell.length >= 2 && cell.startsWith('"') && cell.endsWith('"')) cell = cell.slice(1, -1).replace(/""/g, '"').trim();
-    if (cell === '') continue;
-    const key = cell.toLowerCase();
+    if (cell.length >= 2 && cell.startsWith('"') && cell.endsWith('"') && !cell.slice(1, -1).includes('"')) cell = cell.slice(1, -1).trim();
+    else if (cell.length >= 2 && cell.startsWith('"') && cell.endsWith('"')) cell = cell.slice(1, -1).replace(/""/g, '"').trim();
+    if (cell !== '') lines.push(cell);
+  }
+  if (lines.length === 0) return { query: '', count: 0, truncated: false };
+  const tail = endsWithBreak ? ' OR ' : '';
+  if (lines.length === 1) {
+    // One line: whatever was typed/scanned, kept as written (it may already contain ORs from earlier scans).
+    return { query: lines[0] + tail, count: 1, truncated: false };
+  }
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const line of lines) {
+    const key = line.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    terms.push(cell);
+    terms.push(OPERATOR_IN_TEXT.test(line) ? line : quoteSearchTerm(line));
   }
   const truncated = terms.length > MAX_PASTED_TERMS;
   const used = terms.slice(0, MAX_PASTED_TERMS);
-  return { query: used.map(quoteSearchTerm).join(' OR '), count: used.length, truncated };
+  return { query: used.join(' OR ') + tail, count: used.length, truncated };
+}
+
+// Shopify is sent the query without a dangling operator (`a OR b OR ` -> `a OR b`); the box keeps the trailing OR so
+// the next scan simply continues the list.
+export function searchQueryForShopify(text: string): string {
+  return text.replace(/(\s+(OR|AND))+\s*$/, '').replace(/^\s*(OR|AND)\s*$/, '').trim();
 }

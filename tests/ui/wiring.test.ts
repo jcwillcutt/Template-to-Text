@@ -96,7 +96,9 @@ describe('product search box', () => {
   it('is a multi-line field (a one-line input flattens pasted line breaks) wired to the live, paste-aware handler', () => {
     const box = between('<s-text-area\n                  label="Search products"', '<s-button onClick={runSearch}>');
     expect(box).toContain('onInput={(e: any) => handleSearchInput(e.currentTarget.value)}');
-    expect(box).toContain('onChange={runSearch}');
+    // No onChange: it fires on blur, so the first click on a product started a search that reloaded the list under
+    // the click and swallowed it.
+    expect(box).not.toContain('onChange');
   });
   it('typing searches after a pause; a paste converts to OR and searches immediately', () => {
     const handler = between('const handleSearchInput', 'useEffect(');
@@ -104,6 +106,10 @@ describe('product search box', () => {
     expect(handler).toContain('applySearchNow(text)');
     expect(handler).toContain('setTimeout(');
     expect(handler).toContain('SEARCH_DEBOUNCE_MS');
+  });
+  it('the search sent to Shopify never carries a dangling OR from a scan', () => {
+    const apply = between('const applySearchNow', 'const runSearch');
+    expect(apply).toContain('searchQueryForShopify(text)');
   });
   it('a pending search is cancelled on unmount and replaced by a newer one', () => {
     expect(src).toContain('clearTimeout(searchTimerRef.current)');

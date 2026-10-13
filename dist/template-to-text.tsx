@@ -3424,24 +3424,38 @@ function quoteSearchTerm(term: string): string {
   return clean;
 }
 function hasColumnSeparators(text: string): boolean {
-  return /[\r\n\t]/.test(text);
+  return /[\r\n]/.test(text);
 }
-function columnToOrQuery(pasted: string): { query: string; count: number; truncated: boolean } | null {
-  if (!hasColumnSeparators(pasted)) return null;
+const OPERATOR_IN_TEXT = /\s(OR|AND)\s|\s(OR|AND)$|^NOT\s/;
+function columnToOrQuery(raw: string): { query: string; count: number; truncated: boolean } | null {
+  if (!hasColumnSeparators(raw)) return null;
+  const endsWithBreak = /[\r\n]\s*$/.test(raw);
+  const lines: string[] = [];
+  for (let cell of raw.split(/\r\n|\n|\r/)) {
+    cell = cell.trim();
+    if (cell.length >= 2 && cell.startsWith('"') && cell.endsWith('"') && !cell.slice(1, -1).includes('"')) cell = cell.slice(1, -1).trim();
+    else if (cell.length >= 2 && cell.startsWith('"') && cell.endsWith('"')) cell = cell.slice(1, -1).replace(/""/g, '"').trim();
+    if (cell !== '') lines.push(cell);
+  }
+  if (lines.length === 0) return { query: '', count: 0, truncated: false };
+  const tail = endsWithBreak ? ' OR ' : '';
+  if (lines.length === 1) {
+    return { query: lines[0] + tail, count: 1, truncated: false };
+  }
   const seen = new Set<string>();
   const terms: string[] = [];
-  for (let cell of pasted.split(/\r\n|\n|\r|\t/)) {
-    cell = cell.trim();
-    if (cell.length >= 2 && cell.startsWith('"') && cell.endsWith('"')) cell = cell.slice(1, -1).replace(/""/g, '"').trim();
-    if (cell === '') continue;
-    const key = cell.toLowerCase();
+  for (const line of lines) {
+    const key = line.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    terms.push(cell);
+    terms.push(OPERATOR_IN_TEXT.test(line) ? line : quoteSearchTerm(line));
   }
   const truncated = terms.length > MAX_PASTED_TERMS;
   const used = terms.slice(0, MAX_PASTED_TERMS);
-  return { query: used.map(quoteSearchTerm).join(' OR '), count: used.length, truncated };
+  return { query: used.join(' OR ') + tail, count: used.length, truncated };
+}
+function searchQueryForShopify(text: string): string {
+  return text.replace(/(\s+(OR|AND))+\s*$/, '').replace(/^\s*(OR|AND)\s*$/, '').trim();
 }
 function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
   return matchesSearchQuery(product, rawQuery);
@@ -3963,11 +3977,17 @@ are applied by Shopify itself; they work in the search box, but products found o
 app's own metafield matching are not checked against them.
 
 Pasting a column from Excel or Google Sheets: copy the cells and paste them into the search
-box. The box turns them into an OR search, exactly as if you had typed it:
+box. Each line becomes one alternative, exactly as if you had typed the OR search yourself:
   a / b / c (three cells)   ->   a OR b OR c
 Cells containing spaces are put in quotes, blank and repeated cells are dropped, and at most
-50 values are used (a note appears under the box if some were left out). Copying one cell, or
-a row (tab-separated cells), works too.
+50 values are used (a note appears under the box if some were left out). Only line breaks
+separate values -- tabs do not.
+
+Barcode scanners: a scanner types the code and then presses Enter. Each Enter adds " OR " after
+the code, ready for the next scan, so scanning three items gives:
+  0123456789 OR 9876543210 OR 5551234567 OR
+The search ignores the trailing OR, so results update after every scan. Pressing Enter after
+typing a normal search does the same (it just adds a trailing OR you can type over).
 
 Tips: to search several metafields at once, just list the words (red mug) or use OR between
 alternatives. Product notes you typed into the selection are searched as well.
@@ -4554,8 +4574,9 @@ function Extension() {
       clearTimeout(searchTimerRef.current);
       searchTimerRef.current = null;
     }
-    setAppliedSearch(text);
-    fetchProducts(null, 'forward', text);
+    const effective = searchQueryForShopify(text);
+    setAppliedSearch(effective);
+    fetchProducts(null, 'forward', effective);
   };
   const runSearch = (): void => {
     applySearchNow(productSearch);
@@ -6602,7 +6623,6 @@ function Extension() {
                   placeholder='Search title, handle, tag, SKU, metafield…  (red OR blue, -sale, "exact phrase")'
                   value={productSearch}
                   onInput={(e: any) => handleSearchInput(e.currentTarget.value)}
-                  onChange={runSearch}
                 />
                 <s-button onClick={runSearch}>Search</s-button>
               </s-grid>
