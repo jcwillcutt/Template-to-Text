@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Wall pricing sheet</title>
+<style>
+  @page { margin: 0.2in; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Arial, Helvetica, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .bar { padding: 8px; font-size: 14px; }
+  .bar button { font-size: 14px; padding: 4px 12px; }
+  @media print { .bar { display: none; } }
+  .grid { text-align: center; padding: 0.02in; }
+  .tag { text-align: left; display: inline-block; vertical-align: top; width: 2in; height: 1in; border: 1px solid #000; padding: 0.04in 0.06in; overflow: hidden; break-inside: avoid; page-break-inside: avoid; position: relative; }
+  .price { position: absolute; left: 0.06in; top: 0.04in; width: 1.28in; height: 0.56in; display: flex; align-items: center; justify-content: center; font-weight: bold; line-height: 1; white-space: nowrap; }
+  .p1 { font-size: 19pt; } .p2 { font-size: 15pt; } .p3 { font-size: 11pt; }
+  .qr { position: absolute; right: 0.06in; top: 0.05in; width: 0.56in; height: 0.56in; }
+  .title { position: absolute; left: 0.06in; right: 0.06in; bottom: 0.04in; height: 0.32in; display: flex; align-items: flex-end; font-weight: bold; font-style: italic; line-height: 1.05; overflow: hidden; overflow-wrap: anywhere; }
+  .t1 { font-size: 9pt; } .t2 { font-size: 7pt; } .t3 { font-size: 5.5pt; } .t4 { font-size: 4.5pt; }
+</style>
+</head>
+<body>
+<div class="bar"><button onclick="window.print()">Print</button> Tip: print at 100% scale (not "fit to page"), margins Default, headers and footers off.</div>
+<div class="grid">{{ #selection.foreach product, i=0 }}{{ #variants.foreach v, l=0 }}{{ t = {{ product.title }}{{ #if={{ variant.title }} != Default Title }} - {{ variant.title }}{{/if}} }}{{ tl = {{ #length }}{{ t }}{{/length}} }}{{ pl = {{ #length }}{{ variant.price }}{{/length}} }}{{ tc = 1 }}{{ #if={{ tl }} > 36 }}{{ tc = 2 }}{{/if}}{{ #if={{ tl }} > 72 }}{{ tc = 3 }}{{/if}}{{ #if={{ tl }} > 130 }}{{ tc = 4 }}{{/if}}{{ pc = 1 }}{{ #if={{ pl }} > 5 }}{{ pc = 2 }}{{/if}}{{ #if={{ pl }} > 7 }}{{ pc = 3 }}{{/if}}<div class="tag"><div class="price p{{ pc }}">${{ variant.price }}</div><img class="qr" alt="" src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&amp;margin=0&amp;ecc=M&amp;data=https%3A%2F%2Fwillcuttguitar.com%2Fproducts%2F{{ product.handle }}"><div class="title t{{ tc }}">{{ t }}</div></div>{{/variants.foreach}}{{/selection.foreach}}</div>
+</body>
+</html>

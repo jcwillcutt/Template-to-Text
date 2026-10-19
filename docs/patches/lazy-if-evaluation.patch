@@ -1,0 +1,43 @@
+diff --git a/template-to-text.tsx b/template-to-text.tsx
+index d7de215..72349e9 100644
+--- a/template-to-text.tsx
++++ b/template-to-text.tsx
+@@ -3641,12 +3641,36 @@ function renderTokens(
+   allProducts: ProductData[],
+   ctx: EvalContext,
+ ): string {
+-  const withIf = applyIfBlocks(text, product, allProducts, ctx);
++  const withIf = text;
+   const list = allProducts.length > 0 ? allProducts : [product];
+   let result = '';
+   let cursor = 0;
+   while (cursor < withIf.length) {
+-    const match = findNextRenderBlock(withIf, cursor);
++    const ifMatch = findIfBlock(withIf, cursor);
++    let match = findNextRenderBlock(withIf, cursor);
++    if (ifMatch && (!match || ifMatch.blockStart < match.blockStart)) {
++      const enc = enclosingTokenEnd(withIf, cursor, ifMatch.blockStart);
++      if (enc !== null) {
++        result += renderPlainTokens(withIf.slice(cursor, enc), product, allProducts, ctx);
++        cursor = enc;
++        continue;
++      }
++      result += renderPlainTokens(withIf.slice(cursor, ifMatch.blockStart), product, allProducts, ctx);
++      const cond = renderTemplateText(ifMatch.condition, product, list, ctx, false);
++      if (containsUnresolvedVariableMarker(cond)) {
++        result += cond;
++      } else {
++        let branch = '';
++        try {
++          branch = evaluateBooleanExpression(cond) ? ifMatch.thenInner : (ifMatch.elseInner ?? '');
++        } catch {
++          branch = ifMatch.elseInner ?? '';
++        }
++        result += renderTokens(branch, product, allProducts, ctx);
++      }
++      cursor = ifMatch.blockEnd;
++      continue;
++    }
+     if (!match) {
+       result += renderPlainTokens(withIf.slice(cursor), product, allProducts, ctx);
+       break;
