@@ -5436,7 +5436,8 @@ function Extension() {
         }
         if (plan.zipName == null) {
           const single = files[0];
-          const mediaType = mediaTypeForExtension(sanitizeExtension(tpl.extension));
+          const ext = sanitizeExtension(tpl.extension).toLowerCase();
+          const mediaType = ext === 'html' || ext === 'htm' || ext === 'xml' ? 'application/octet-stream' : mediaTypeForExtension(ext);
           setDownload({
             href: `data:${mediaType};charset=utf-8,${encodeURIComponent(single.content)}`,
             name: single.name,
