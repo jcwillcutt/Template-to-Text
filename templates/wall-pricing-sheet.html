@@ -4,18 +4,22 @@
 <meta charset="utf-8">
 <title>Wall pricing sheet</title>
 <style>
-  @page { size: 11in 8.5in; margin: 0.25in 0.5in; }
+  @page { margin: 0.25in; }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: Arial, Helvetica, sans-serif; }
-  .sheet { display: grid; grid-template-columns: repeat(5, 2in); grid-auto-rows: 1in; width: 10in; break-after: page; page-break-after: always; }
-  .sheet:last-child { break-after: auto; page-break-after: auto; }
-  .tag { width: 2in; height: 1in; border: 1px solid #000; padding: 0.04in 0.06in; overflow: hidden; display: grid; grid-template-columns: 1fr 0.58in; grid-template-rows: 0.58in 1fr; column-gap: 0.04in; }
-  .price { font-size: 19pt; font-weight: bold; align-self: center; text-align: center; line-height: 1; }
-  .qr { width: 0.58in; height: 0.58in; display: block; }
-  .title { grid-column: 1 / span 2; font-size: 9pt; font-weight: bold; font-style: italic; line-height: 1.05; overflow: hidden; align-self: end; max-height: 0.28in; }
+  body { margin: 0; font-family: Arial, Helvetica, sans-serif; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .bar { padding: 8px; font-size: 14px; }
+  .bar button { font-size: 14px; padding: 4px 12px; }
+  @media print { .bar { display: none; } }
+  .tag { display: inline-block; vertical-align: top; width: 2in; height: 1in; border: 1px solid #000; padding: 0.04in 0.06in; overflow: hidden; break-inside: avoid; page-break-inside: avoid; position: relative; }
+  .price { position: absolute; left: 0.06in; top: 0.04in; width: 1.28in; height: 0.56in; display: flex; align-items: center; justify-content: center; font-weight: bold; line-height: 1; white-space: nowrap; }
+  .p1 { font-size: 19pt; } .p2 { font-size: 15pt; } .p3 { font-size: 11pt; }
+  .qr { position: absolute; right: 0.06in; top: 0.04in; width: 0.56in; height: 0.56in; }
+  .title { position: absolute; left: 0.06in; right: 0.06in; bottom: 0.04in; height: 0.32in; display: flex; align-items: flex-end; font-weight: bold; font-style: italic; line-height: 1.05; overflow: hidden; overflow-wrap: anywhere; }
+  .t1 { font-size: 9pt; } .t2 { font-size: 7pt; } .t3 { font-size: 5.5pt; } .t4 { font-size: 4.5pt; }
 </style>
 </head>
 <body>
-{{ n = 0 }}{{ #selection.foreach product, i=0 }}{{ #variants.foreach v, l=0 }}{{ #if={{ = {{ n }} % 40 }} == 0 }}{{ #if={{ n }} > 0 }}</div>{{/if}}<div class="sheet">{{/if}}<div class="tag"><div class="price">${{ variant.price }}</div><img class="qr" alt="" src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&amp;margin=0&amp;ecc=M&amp;data=https%3A%2F%2Fwillcuttguitar.com%2Fproducts%2F{{ product.handle }}"><div class="title">{{ product.title }}{{ #if={{ variant.title }} != Default Title }} - {{ variant.title }}{{/if}}</div></div>{{ n = {{ = {{ n }} + 1 }} }}{{/variants.foreach}}{{/selection.foreach}}{{ #if={{ n }} > 0 }}</div>{{/if}}
+<div class="bar"><button onclick="window.print()">Print</button> Tip: print at 100% scale (not "fit to page"), margins Default or None, headers and footers off.</div>
+{{ #selection.foreach product, i=0 }}{{ #variants.foreach v, l=0 }}{{ t = {{ product.title }}{{ #if={{ variant.title }} != Default Title }} - {{ variant.title }}{{/if}} }}{{ tl = {{ #length }}{{ t }}{{/length}} }}{{ pl = {{ #length }}{{ variant.price }}{{/length}} }}{{ tc = 1 }}{{ #if={{ tl }} > 36 }}{{ tc = 2 }}{{/if}}{{ #if={{ tl }} > 72 }}{{ tc = 3 }}{{/if}}{{ #if={{ tl }} > 130 }}{{ tc = 4 }}{{/if}}{{ pc = 1 }}{{ #if={{ pl }} > 5 }}{{ pc = 2 }}{{/if}}{{ #if={{ pl }} > 7 }}{{ pc = 3 }}{{/if}}<div class="tag"><div class="price p{{ pc }}">${{ variant.price }}</div><img class="qr" alt="" src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&amp;margin=0&amp;ecc=M&amp;data=https%3A%2F%2Fwillcuttguitar.com%2Fproducts%2F{{ product.handle }}"><div class="title t{{ tc }}">{{ t }}</div></div>{{/variants.foreach}}{{/selection.foreach}}
 </body>
 </html>
