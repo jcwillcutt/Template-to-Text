@@ -1943,14 +1943,41 @@ function parseInline(text: string): Node[] {
 }
 function numeric(expr: string): Node[] | null {
   const trimmed = expr.trim();
-  return trimmed === '' ? null : parseInline(trimmed);
+  return trimmed === '' ? null : parseFull(trimmed).root;
 }
 function operand(text: string): Operand {
-  const nodes = parseInline(text);
+  const nodes = parseFull(text).root;
   const constant = nodes.every((n) => n.k === 'text') ? nodes.map((n) => (n as { s: string }).s).join('') : null;
   return { nodes, constant };
 }
 const BAD: Cond = { c: 'bad' };
+function atomEnd(text: string, i: number, end: number): number {
+  const head = text.slice(i + 2, end - 2).replace(/^\s+/, '');
+  const opener = head[0] === '#' || head.startsWith('while=') ? OPENERS.find((o) => o.re.test(head)) : undefined;
+  if (!opener || head.trim() === '#else') return end;
+  let depth = 1;
+  let j = end;
+  while (j < text.length) {
+    const open = text.indexOf('{{', j);
+    if (open === -1) break;
+    const close = findMatchingClose(text, open);
+    if (close === -1) {
+      j = open + 1;
+      continue;
+    }
+    const inner = text.slice(open + 2, close - 2);
+    const h = inner.replace(/^\s+/, '');
+    const t = inner.trim();
+    if (t[0] === '/' && CLOSERS.some((c) => c.fam === opener.fam && c.re.test(t))) {
+      depth -= 1;
+      if (depth === 0) return close;
+    } else if ((h[0] === '#' || h.startsWith('while=')) && opener.re.test(h)) {
+      depth += 1;
+    }
+    j = close;
+  }
+  return end;
+}
 function scanStatic(text: string, visit: (i: number, depth: number) => boolean): number {
   let depth = 0;
   let i = 0;
@@ -1958,7 +1985,7 @@ function scanStatic(text: string, visit: (i: number, depth: number) => boolean):
     if (text[i] === '{' && text[i + 1] === '{') {
       const end = findMatchingClose(text, i);
       if (end !== -1) {
-        i = end;
+        i = atomEnd(text, i, end);
         continue;
       }
     }
@@ -1998,7 +2025,7 @@ function isFullyParenthesized(expr: string): boolean {
     if (expr[i] === '{' && expr[i + 1] === '{') {
       const end = findMatchingClose(expr, i);
       if (end !== -1) {
-        i = end;
+        i = atomEnd(expr, i, end);
         continue;
       }
     }
@@ -2052,7 +2079,7 @@ function makeToken(inner: string): Node {
   if (trimmed[0] === '#' || trimmed[0] === '/') return textNode('{{' + inner + '}}');
   if (trimmed === 'break') return { k: 'ctl', v: 2 };
   if (trimmed === 'skip') return { k: 'ctl', v: 1 };
-  if (trimmed[0] === '=') return { k: 'math', expr: parseInline(trimmed.slice(1)) };
+  if (trimmed[0] === '=') return { k: 'math', expr: parseFull(trimmed.slice(1)).root };
   if (LENGTH_PREFIX_REGEX.test(trimmed)) {
     return textNode(deprecatedSyntaxMarker('the length=STRING token is retired -- use {{ #length }}STRING{{ /length }} instead'));
   }
@@ -3683,10 +3710,10 @@ A condition with no comparison at all is just checked for "truthy" (non-empty,
 non-zero, and not literally FALSE or 0).
 
 Inside a condition (or an equation), a field or variable must be wrapped in its own
-{{ }}. Block tools such as {{ #length }}...{{/length}} are NOT run inside a condition:
-assign the result to a variable first, then test the variable.
-  {{ n = {{ #length }}{{ product.handle }}{{/length}} }}
-  {{ #if={{ n }} < 100 }}short{{ /if }}
+{{ }}. Block tools such as {{ #length }}...{{/length}} and {{ #replace }}...{{/replace}}
+work there too:
+  {{ #if={{ #length }}{{ product.handle }}{{/length}} < 100 }}short{{ /if }}
+  {{ = {{ #length }}{{ product.title }}{{/length}} * 2 }}
 
 
 7. IF / ELSE
@@ -4393,10 +4420,10 @@ function Extension() {
       return null;
     }
   };
-  const rememberProducts = (list: ProductData[]): void => {
+  const rememberProducts = (list: ProductData[], replaceExisting = false): void => {
     if (list.length === 0) return;
     const { byId, order } = loadedProductsRef.current;
-    const freshProducts = list.filter((p) => !byId[p.id]);
+    const freshProducts = replaceExisting ? list : list.filter((p) => !byId[p.id]);
     const nextById = { ...byId };
     const nextOrder = [...order];
     for (const p of list) {
@@ -4429,6 +4456,7 @@ function Extension() {
     cursor: string | null,
     direction: 'forward' | 'backward',
     query: string,
+    replaceCached = false,
   ): Promise<void> => {
     const requestKey = `${direction}|${cursor ?? ''}|${query.trim()}`;
     if (productRequestRef.current.pendingKey === requestKey) {
@@ -4459,7 +4487,7 @@ function Extension() {
         const pageProducts: ProductData[] = data.products.edges.map((e: any) => mapProduct(e.node));
         setProducts(pageProducts);
         setProductPageInfo(data.products.pageInfo);
-        rememberProducts(pageProducts);
+        rememberProducts(pageProducts, replaceCached);
       }
     } catch (err: any) {
       if (productRequestRef.current.token === requestToken) {
@@ -4620,13 +4648,27 @@ function Extension() {
       fetchProducts(productPageInfo.startCursor, 'backward', appliedSearch);
     }
   };
+  const refreshSelectedProductData = async (): Promise<void> => {
+    const ids = Object.keys(selectedProducts);
+    if (ids.length === 0) return;
+    const { products: fresh, error } = await loadProductsByIds(ids, true);
+    if (error || fresh.length === 0) return;
+    setSelectedProducts((prev) => {
+      const next = { ...prev };
+      for (const p of fresh) {
+        if (next[p.id]) next[p.id] = p;
+      }
+      return next;
+    });
+  };
   const refreshAll = async (): Promise<void> => {
     if (refreshing) return;
     setRefreshing(true);
     try {
       await fetchTemplates();
       await loadSelections();
-      await fetchProducts(null, 'forward', appliedSearch);
+      await fetchProducts(null, 'forward', appliedSearch, true);
+      await refreshSelectedProductData();
     } finally {
       setRefreshing(false);
     }
@@ -5053,7 +5095,8 @@ function Extension() {
   };
   const refreshTemplatesAndProducts = (): void => {
     fetchTemplates();
-    fetchProducts(null, 'forward', appliedSearch);
+    fetchProducts(null, 'forward', appliedSearch, true);
+    refreshSelectedProductData();
   };
   const backToMain = (): void => {
     setView('main');
@@ -5528,11 +5571,12 @@ function Extension() {
   };
   const loadProductsByIds = async (
     ids: string[],
+    skipCache = false,
   ): Promise<{ products: ProductData[]; missing: boolean; error: string | null }> => {
     const found: Record<string, ProductData> = {};
     const toFetch: string[] = [];
     for (const id of ids) {
-      const cached = loadedProductsRef.current.byId[id];
+      const cached = skipCache ? undefined : loadedProductsRef.current.byId[id];
       if (cached) {
         found[id] = cached;
       } else {
@@ -5554,7 +5598,7 @@ function Extension() {
       const fetched: ProductData[] = (data?.nodes || [])
         .filter((node: any) => node && node.id)
         .map((node: any) => mapProduct(node));
-      rememberProducts(fetched);
+      rememberProducts(fetched, skipCache);
       for (const p of fetched) {
         found[p.id] = p;
       }
@@ -6248,6 +6292,12 @@ function Extension() {
       </s-modal>
     </s-page>
   );
+  const describeVariantSelection = (p: ProductData): string => {
+    if (p.allVariants.length <= 1) return '';
+    const names = p.variants.map((v: VariantData) => v.title).join(', ');
+    if (p.variants.length >= p.allVariants.length) return `All ${p.allVariants.length} variants: ${names}`;
+    return `Variants (${p.variants.length} of ${p.allVariants.length}): ${names}`;
+  };
   const renderSelectionView = () => (
     <s-page heading={selectionSlotLabel(selectionSlot!)} inlineSize="large">
       <s-stack slot="header-actions" direction="inline" gap="base">
@@ -6411,16 +6461,21 @@ function Extension() {
                               alt={row.product.title}
                             />
                           ) : null}
-                          {adminProductUrl(row.product.id, primaryDomain) ? (
-                            <s-link
-                              href={adminProductUrl(row.product.id, primaryDomain)!}
-                              target="_blank"
-                            >
+                          <s-stack gap="small-400">
+                            {adminProductUrl(row.product.id, primaryDomain) ? (
+                              <s-link
+                                href={adminProductUrl(row.product.id, primaryDomain)!}
+                                target="_blank"
+                              >
+                                <s-text type="strong">{row.product.title}</s-text>
+                              </s-link>
+                            ) : (
                               <s-text type="strong">{row.product.title}</s-text>
-                            </s-link>
-                          ) : (
-                            <s-text type="strong">{row.product.title}</s-text>
-                          )}
+                            )}
+                            {describeVariantSelection(row.product) ? (
+                              <s-text color="subdued">{describeVariantSelection(row.product)}</s-text>
+                            ) : null}
+                          </s-stack>
                         </s-stack>
                       ) : (
                         <s-text type="strong">📝 Note</s-text>

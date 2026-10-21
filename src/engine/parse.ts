@@ -93,11 +93,12 @@ export function parseInline(text: string): Node[] {
 // null when empty, which callers read as "no value".
 function numeric(expr: string): Node[] | null {
   const trimmed = expr.trim();
-  return trimmed === '' ? null : parseInline(trimmed);
+  return trimmed === '' ? null : parseFull(trimmed).root;
 }
 
 function operand(text: string): Operand {
-  const nodes = parseInline(text);
+  // Full parse: block tools (`{{ #length }}..{{/length}}`, `#replace`, `#index`, ...) work inside conditions.
+  const nodes = parseFull(text).root;
   const constant = nodes.every((n) => n.k === 'text') ? nodes.map((n) => (n as { s: string }).s).join('') : null;
   return { nodes, constant };
 }
@@ -107,6 +108,36 @@ function operand(text: string): Operand {
 // are skipped as atoms -- while parentheses group exactly as the legacy grammar did.
 const BAD: Cond = { c: 'bad' };
 
+// Index just past the atom that starts at `i` (where text[i..i+1] is `{{` and `end` closes that token):
+// a plain token ends at `end`; a block opener extends to its matching closer so the body is skipped too.
+function atomEnd(text: string, i: number, end: number): number {
+  const head = text.slice(i + 2, end - 2).replace(/^\s+/, '');
+  const opener = head[0] === '#' || head.startsWith('while=') ? OPENERS.find((o) => o.re.test(head)) : undefined;
+  if (!opener || head.trim() === '#else') return end;
+  let depth = 1;
+  let j = end;
+  while (j < text.length) {
+    const open = text.indexOf('{{', j);
+    if (open === -1) break;
+    const close = findMatchingClose(text, open);
+    if (close === -1) {
+      j = open + 1;
+      continue;
+    }
+    const inner = text.slice(open + 2, close - 2);
+    const h = inner.replace(/^\s+/, '');
+    const t = inner.trim();
+    if (t[0] === '/' && CLOSERS.some((c) => c.fam === opener.fam && c.re.test(t))) {
+      depth -= 1;
+      if (depth === 0) return close;
+    } else if ((h[0] === '#' || h.startsWith('while=')) && opener.re.test(h)) {
+      depth += 1;
+    }
+    j = close;
+  }
+  return end;
+}
+
 // Visit each static character (not inside a `{{ }}` token, not a paren) with the current paren depth.
 function scanStatic(text: string, visit: (i: number, depth: number) => boolean): number {
   let depth = 0;
@@ -115,7 +146,7 @@ function scanStatic(text: string, visit: (i: number, depth: number) => boolean):
     if (text[i] === '{' && text[i + 1] === '{') {
       const end = findMatchingClose(text, i);
       if (end !== -1) {
-        i = end;
+        i = atomEnd(text, i, end);
         continue;
       }
     }
@@ -157,7 +188,7 @@ function isFullyParenthesized(expr: string): boolean {
     if (expr[i] === '{' && expr[i + 1] === '{') {
       const end = findMatchingClose(expr, i);
       if (end !== -1) {
-        i = end;
+        i = atomEnd(expr, i, end);
         continue;
       }
     }
@@ -219,7 +250,7 @@ export function makeToken(inner: string): Node {
   if (trimmed[0] === '#' || trimmed[0] === '/') return textNode('{{' + inner + '}}');
   if (trimmed === 'break') return { k: 'ctl', v: 2 };
   if (trimmed === 'skip') return { k: 'ctl', v: 1 };
-  if (trimmed[0] === '=') return { k: 'math', expr: parseInline(trimmed.slice(1)) };
+  if (trimmed[0] === '=') return { k: 'math', expr: parseFull(trimmed.slice(1)).root };
   if (LENGTH_PREFIX_REGEX.test(trimmed)) {
     return textNode(deprecatedSyntaxMarker('the length=STRING token is retired -- use {{ #length }}STRING{{ /length }} instead'));
   }

@@ -175,10 +175,10 @@ A condition with no comparison at all is just checked for "truthy" (non-empty,
 non-zero, and not literally FALSE or 0).
 
 Inside a condition (or an equation), a field or variable must be wrapped in its own
-{{ }}. Block tools such as {{ #length }}...{{/length}} are NOT run inside a condition:
-assign the result to a variable first, then test the variable.
-  {{ n = {{ #length }}{{ product.handle }}{{/length}} }}
-  {{ #if={{ n }} < 100 }}short{{ /if }}
+{{ }}. Block tools such as {{ #length }}...{{/length}} and {{ #replace }}...{{/replace}}
+work there too:
+  {{ #if={{ #length }}{{ product.handle }}{{/length}} < 100 }}short{{ /if }}
+  {{ = {{ #length }}{{ product.title }}{{/length}} * 2 }}
 
 
 7. IF / ELSE

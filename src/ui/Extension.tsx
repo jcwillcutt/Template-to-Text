@@ -562,14 +562,15 @@ function Extension() {
   // Merge freshly loaded products into both the ref cache and the state map used by client-side
   // search, capped at LOADED_PRODUCTS_CACHE_LIMIT (evicting the oldest-loaded products first) so the
   // cache doesn't grow without bound across a very long session.
-  const rememberProducts = (list: ProductData[]): void => {
+  const rememberProducts = (list: ProductData[], replaceExisting = false): void => {
     if (list.length === 0) return;
     // Work out which products are genuinely new BEFORE the ref is updated. Re-visiting a page the
     // app has already loaded (for example clearing the search to return to the newest arrivals)
     // brings back the same ids, and replacing the state map in that case would hand every consumer
     // a brand-new object for no reason and churn the whole page.
     const { byId, order } = loadedProductsRef.current;
-    const freshProducts = list.filter((p) => !byId[p.id]);
+    // A refresh passes replaceExisting so already-known products are replaced too (quantities, prices).
+    const freshProducts = replaceExisting ? list : list.filter((p) => !byId[p.id]);
     const nextById = { ...byId };
     const nextOrder = [...order];
     for (const p of list) {
@@ -603,6 +604,7 @@ function Extension() {
     cursor: string | null,
     direction: 'forward' | 'backward',
     query: string,
+    replaceCached = false,
   ): Promise<void> => {
     // Ignore a repeat of the request that is already running (same direction, cursor, and query).
     const requestKey = `${direction}|${cursor ?? ''}|${query.trim()}`;
@@ -636,7 +638,7 @@ function Extension() {
         setProducts(pageProducts);
         setProductPageInfo(data.products.pageInfo);
         // Merge this page into the persistent loaded-products map for client-side search.
-        rememberProducts(pageProducts);
+        rememberProducts(pageProducts, replaceCached);
       }
     } catch (err: any) {
       if (productRequestRef.current.token === requestToken) {
@@ -837,13 +839,30 @@ function Extension() {
   // Re-read everything the app shows from Shopify: templates, saved selections and their subtitles,
   // and the current page of products for the applied search term. Selections made in the app are
   // preserved; only the loaded data is refreshed.
+  // Re-read the products already in the Current Selection straight from Shopify and swap them in, so
+  // quantities, prices and titles are current. Products Shopify no longer returns are left as they were.
+  const refreshSelectedProductData = async (): Promise<void> => {
+    const ids = Object.keys(selectedProducts);
+    if (ids.length === 0) return;
+    const { products: fresh, error } = await loadProductsByIds(ids, true);
+    if (error || fresh.length === 0) return;
+    setSelectedProducts((prev) => {
+      const next = { ...prev };
+      for (const p of fresh) {
+        if (next[p.id]) next[p.id] = p;
+      }
+      return next;
+    });
+  };
+
   const refreshAll = async (): Promise<void> => {
     if (refreshing) return;
     setRefreshing(true);
     try {
       await fetchTemplates();
       await loadSelections();
-      await fetchProducts(null, 'forward', appliedSearch);
+      await fetchProducts(null, 'forward', appliedSearch, true);
+      await refreshSelectedProductData();
     } finally {
       setRefreshing(false);
     }
@@ -1378,7 +1397,8 @@ function Extension() {
   // already re-render on completion everywhere else they're called.
   const refreshTemplatesAndProducts = (): void => {
     fetchTemplates();
-    fetchProducts(null, 'forward', appliedSearch);
+    fetchProducts(null, 'forward', appliedSearch, true);
+    refreshSelectedProductData();
   };
 
   const backToMain = (): void => {
@@ -2009,11 +2029,12 @@ function Extension() {
   // (deleted products) are reported through the `missing` flag.
   const loadProductsByIds = async (
     ids: string[],
+    skipCache = false,
   ): Promise<{ products: ProductData[]; missing: boolean; error: string | null }> => {
     const found: Record<string, ProductData> = {};
     const toFetch: string[] = [];
     for (const id of ids) {
-      const cached = loadedProductsRef.current.byId[id];
+      const cached = skipCache ? undefined : loadedProductsRef.current.byId[id];
       if (cached) {
         found[id] = cached;
       } else {
@@ -2035,7 +2056,7 @@ function Extension() {
       const fetched: ProductData[] = (data?.nodes || [])
         .filter((node: any) => node && node.id)
         .map((node: any) => mapProduct(node));
-      rememberProducts(fetched);
+      rememberProducts(fetched, skipCache);
       for (const p of fetched) {
         found[p.id] = p;
       }
@@ -2905,6 +2926,15 @@ function Extension() {
     </s-page>
   );
 
+  // One-line summary of which variants of a product are in a selection ("2 of 5: Small, Large"), or
+  // '' for a single-variant product.
+  const describeVariantSelection = (p: ProductData): string => {
+    if (p.allVariants.length <= 1) return '';
+    const names = p.variants.map((v: VariantData) => v.title).join(', ');
+    if (p.variants.length >= p.allVariants.length) return `All ${p.allVariants.length} variants: ${names}`;
+    return `Variants (${p.variants.length} of ${p.allVariants.length}): ${names}`;
+  };
+
   const renderSelectionView = () => (
     <s-page heading={selectionSlotLabel(selectionSlot!)} inlineSize="large">
       <s-stack slot="header-actions" direction="inline" gap="base">
@@ -3071,16 +3101,21 @@ function Extension() {
                               alt={row.product.title}
                             />
                           ) : null}
-                          {adminProductUrl(row.product.id, primaryDomain) ? (
-                            <s-link
-                              href={adminProductUrl(row.product.id, primaryDomain)!}
-                              target="_blank"
-                            >
+                          <s-stack gap="small-400">
+                            {adminProductUrl(row.product.id, primaryDomain) ? (
+                              <s-link
+                                href={adminProductUrl(row.product.id, primaryDomain)!}
+                                target="_blank"
+                              >
+                                <s-text type="strong">{row.product.title}</s-text>
+                              </s-link>
+                            ) : (
                               <s-text type="strong">{row.product.title}</s-text>
-                            </s-link>
-                          ) : (
-                            <s-text type="strong">{row.product.title}</s-text>
-                          )}
+                            )}
+                            {describeVariantSelection(row.product) ? (
+                              <s-text color="subdued">{describeVariantSelection(row.product)}</s-text>
+                            ) : null}
+                          </s-stack>
                         </s-stack>
                       ) : (
                         <s-text type="strong">📝 Note</s-text>

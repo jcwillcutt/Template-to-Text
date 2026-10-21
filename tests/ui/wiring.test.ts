@@ -118,3 +118,14 @@ describe('product search box', () => {
     expect(src).toContain('TAB_TOKEN_SNIPPET');
   });
 });
+
+describe('refresh and selection variants', () => {
+  it('Refresh Page re-reads products from Shopify instead of the cache, including selected products', () => {
+    expect(src).toMatch(/await fetchProducts\(null, 'forward', appliedSearch, true\);\s*await refreshSelectedProductData\(\);/);
+    expect(src).toContain('loadProductsByIds(ids, true)');
+    expect(src).toContain('skipCache ? undefined : loadedProductsRef.current.byId[id]');
+  });
+  it('the Selection view shows which variants of each product are included', () => {
+    expect(src).toContain('describeVariantSelection(row.product)');
+  });
+});
