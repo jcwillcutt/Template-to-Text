@@ -2926,13 +2926,21 @@ function Extension() {
     </s-page>
   );
 
-  // One-line summary of which variants of a product are in a selection ("2 of 5: Small, Large"), or
-  // '' for a single-variant product.
-  const describeVariantSelection = (p: ProductData): string => {
-    if (p.allVariants.length <= 1) return '';
-    const names = p.variants.map((v: VariantData) => v.title).join(', ');
-    if (p.variants.length >= p.allVariants.length) return `All ${p.allVariants.length} variants: ${names}`;
-    return `Variants (${p.variants.length} of ${p.allVariants.length}): ${names}`;
+  // Tick/untick one variant of a product in the open selection's draft. The last ticked variant can't be
+  // unticked (a product needs at least one).
+  const setSelectionDraftVariant = (productId: string, variantId: string, checked: boolean): void => {
+    setSelectionDraft((prev) =>
+      prev.map((p: ProductData) => {
+        if (p.id !== productId) return p;
+        const has = p.variants.some((v: VariantData) => v.id === variantId);
+        if (has === checked) return p;
+        const ids = new Set(p.variants.map((v: VariantData) => v.id));
+        if (checked) ids.add(variantId);
+        else ids.delete(variantId);
+        if (ids.size === 0) return p;
+        return { ...p, variants: p.allVariants.filter((v: VariantData) => ids.has(v.id)) };
+      }),
+    );
   };
 
   const renderSelectionView = () => (
@@ -3112,8 +3120,23 @@ function Extension() {
                             ) : (
                               <s-text type="strong">{row.product.title}</s-text>
                             )}
-                            {describeVariantSelection(row.product) ? (
-                              <s-text color="subdued">{describeVariantSelection(row.product)}</s-text>
+                            {row.product.allVariants.length > 1 ? (
+                              <s-stack gap="small-200">
+                                <s-text color="subdued">
+                                  Variants ({row.product.variants.length} of {row.product.allVariants.length} selected)
+                                </s-text>
+                                {row.product.allVariants.map((v: VariantData) => (
+                                  <s-checkbox
+                                    key={v.id}
+                                    label={`${v.title} · ${formatQty(v.inventoryQuantity)}`}
+                                    accessibilityLabel={`Include variant ${v.title} of ${row.product.title}`}
+                                    checked={row.product.variants.some((x: VariantData) => x.id === v.id)}
+                                    onChange={(e: any) =>
+                                      setSelectionDraftVariant(row.product.id, v.id, e.currentTarget.checked)
+                                    }
+                                  />
+                                ))}
+                              </s-stack>
                             ) : null}
                           </s-stack>
                         </s-stack>

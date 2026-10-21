@@ -32,7 +32,7 @@ function toItalic(str: string): string {
 // in order) used to detect unsaved changes.
 function selectionSignature(list: ProductData[], notes: SelectionEntry[] = []): string {
   return (
-    list.map((p) => `${p.id}::${p.note || ''}`).join('|') +
+    list.map((p) => `${p.id}::${p.note || ''}::${p.variants.map((v) => v.id).join(',')}`).join('|') +
     '#' +
     notes.map((n) => `${n.id}::${n.note}`).join('|')
   );

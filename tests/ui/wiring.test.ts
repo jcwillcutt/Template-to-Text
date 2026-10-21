@@ -125,7 +125,7 @@ describe('refresh and selection variants', () => {
     expect(src).toContain('loadProductsByIds(ids, true)');
     expect(src).toContain('skipCache ? undefined : loadedProductsRef.current.byId[id]');
   });
-  it('the Selection view shows which variants of each product are included', () => {
-    expect(src).toContain('describeVariantSelection(row.product)');
+  it('the Selection view shows lists every variant of a multi-variant product with a checkbox for the included ones', () => {
+    expect(src).toContain('setSelectionDraftVariant(row.product.id, v.id, e.currentTarget.checked)');
   });
 });
