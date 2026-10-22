@@ -147,3 +147,12 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   * Changed look: the pinned/unpinned divider in the template list is gone (pinned templates are still listed first and
     keep the blue actions button).
   * Not changed: the Selection view's table may overflow the same way and has no row click.
+
+* **Multi-template downloads and Selection view controls (unverified in a live admin):** templates are multi-select (click
+  toggles, a quick double click still opens the editor and leaves the selection as it was). Settings > Download Settings
+  chooses "Group downloads by Template" (default; `multiple-templates-<date time>.zip` holding each template's usual
+  files/folder) or "Alternate Templates Every Selection" (numbered files, product 1 template 1, product 1 template 2, ...;
+  templates of different file-break types go in `<type>-<date time>/` subfolders). Logic: `src/engine/multi.ts`, tests in
+  `tests/engine/multi-template.test.ts`. The choice is kept for the session only. The Selection view lost its remove-X
+  buttons, "Clear Selection" became "Clear Selected", checkboxes/Select All appear on the Current Selection too, and a
+  Reorder button (black when on) shows/hides the arrows.

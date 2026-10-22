@@ -3208,6 +3208,90 @@ function yieldToBrowser(): Promise<void> {
     setTimeout(resolve, 0);
   });
 }
+type MultiDownloadMode = 'grouped' | 'alternate';
+interface MultiTemplateInput {
+  title: string;
+  body: string;
+  extension: string;
+  fileBreak: FileBreak | null;
+  mergeCondition: string;
+}
+interface Slot {
+  plan: number;
+  file: number;
+  folder: string;
+  prefix: string;
+}
+function planMultiTemplateDownload(
+  templates: MultiTemplateInput[],
+  products: ProductData[],
+  notes: SelectionEntry[],
+  primaryDomain: string,
+  now: Date,
+  globalBodiesByTitle: Record<string, string>,
+  mode: MultiDownloadMode,
+): FilePlan {
+  const timestamp = formatTimestamp(now);
+  const plans = templates
+    .map((t) => ({
+      type: t.fileBreak ?? 'unset',
+      plan: planOutputFiles(t.title, t.body, t.extension, products, notes, t.fileBreak, t.mergeCondition, primaryDomain, now, globalBodiesByTitle),
+    }))
+    .filter((p) => p.plan.count > 0);
+  const slots: Slot[] = [];
+  if (mode === 'grouped') {
+    plans.forEach((p, plan) => {
+      const folder = p.plan.zipName ? p.plan.zipName.replace(/\.zip$/i, '') + '/' : '';
+      for (let file = 0; file < p.plan.count; file++) slots.push({ plan, file, folder, prefix: '' });
+    });
+  } else {
+    const types: string[] = [];
+    for (const p of plans) if (types.indexOf(p.type) === -1) types.push(p.type);
+    for (const type of types) {
+      const members: number[] = [];
+      plans.forEach((p, i) => {
+        if (p.type === type) members.push(i);
+      });
+      const folder = types.length > 1 ? `${type}-${timestamp}/` : '';
+      const total = members.reduce((sum, m) => sum + plans[m].plan.count, 0);
+      const width = String(total).length;
+      let seq = 0;
+      const most = Math.max(...members.map((m) => plans[m].plan.count));
+      for (let file = 0; file < most; file++) {
+        for (const m of members) {
+          if (file >= plans[m].plan.count) continue;
+          seq += 1;
+          slots.push({ plan: m, file, folder, prefix: String(seq).padStart(width, '0') + '_' });
+        }
+      }
+    }
+  }
+  const used = new Set<string>();
+  const uniqueName = (name: string): string => {
+    if (!used.has(name)) {
+      used.add(name);
+      return name;
+    }
+    const dot = name.lastIndexOf('.');
+    const stem = dot > name.lastIndexOf('/') ? name.slice(0, dot) : name;
+    const ext = dot > name.lastIndexOf('/') ? name.slice(dot) : '';
+    let n = 1;
+    while (used.has(`${stem}_${n}${ext}`)) n += 1;
+    const unique = `${stem}_${n}${ext}`;
+    used.add(unique);
+    return unique;
+  };
+  return {
+    count: slots.length,
+    zipName: `multiple-templates-${timestamp}.zip`,
+    build: (index: number): ZipEntry => {
+      const slot = slots[index];
+      const entry = plans[slot.plan].plan.build(slot.file);
+      return { name: uniqueName(slot.folder + slot.prefix + entry.name), content: entry.content };
+    },
+    sourceIdsByIndex: slots.map((s) => plans[s.plan].plan.sourceIdsByIndex[s.file] || []),
+  };
+}
 const INSERT_PLACEHOLDER_TEXT = '{{ insert }}';
 function insertIntoText(prev: string, token: string): string {
   const placeholder = /\{\{\s*insert\s*\}\}/g;
@@ -4155,8 +4239,11 @@ function Extension() {
   const [templateSort, setTemplateSort] = useState<'new-old' | 'old-new' | 'a-z' | 'z-a'>(
     'new-old',
   );
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
+  const [downloadMode, setDownloadMode] = useState<MultiDownloadMode>('grouped');
+  const [reorderMode, setReorderMode] = useState<boolean>(false);
   const lastTemplateClickRef = useRef<ClickRecord | null>(null);
+  const templateWasSelectedRef = useRef<boolean>(false);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
   const [pinningId, setPinningId] = useState<string | null>(null);
@@ -4213,9 +4300,9 @@ function Extension() {
     () => selectedProductList.reduce((sum: number, p: ProductData) => sum + p.variants.length, 0),
     [selectedProductList],
   );
-  const selectedTemplate = useMemo(
-    () => templates.find((t) => t.id === selectedTemplateId) || null,
-    [templates, selectedTemplateId],
+  const selectedTemplates = useMemo(
+    () => templates.filter((t) => selectedTemplateIds.includes(t.id)),
+    [templates, selectedTemplateIds],
   );
   const pendingDeleteTemplate = useMemo(
     () => templates.find((t: TemplateData) => t.id === pendingDeleteId) || null,
@@ -4811,7 +4898,7 @@ function Extension() {
     setNoteObjects([]);
   };
   const clearTemplateSelection = (): void => {
-    setSelectedTemplateId(null);
+    setSelectedTemplateIds([]);
   };
   const openNewTemplate = (): void => {
     setEditingTemplate(null);
@@ -5060,13 +5147,24 @@ function Extension() {
     );
   };
   const handleTemplateRowClick = (tpl: TemplateData): void => {
-    const click = registerClick(lastTemplateClickRef.current, tpl.id, Date.now());
+    const before = lastTemplateClickRef.current;
+    const click = registerClick(before, tpl.id, Date.now());
     lastTemplateClickRef.current = click.next;
     if (click.isDouble) {
+      const wasSelected = templateWasSelectedRef.current;
+      setSelectedTemplateIds((prev: string[]) => {
+        const has = prev.includes(tpl.id);
+        if (has === wasSelected) return prev;
+        return wasSelected ? [...prev, tpl.id] : prev.filter((id: string) => id !== tpl.id);
+      });
       openEditTemplate(tpl);
       return;
     }
-    setSelectedTemplateId(tpl.id);
+    if (before !== null && click.next === before) return;
+    templateWasSelectedRef.current = selectedTemplateIds.includes(tpl.id);
+    setSelectedTemplateIds((prev: string[]) =>
+      prev.includes(tpl.id) ? prev.filter((id: string) => id !== tpl.id) : [...prev, tpl.id],
+    );
   };
   const openEditTemplate = (tpl: TemplateData): void => {
     setEditingTemplate(tpl);
@@ -5334,9 +5432,7 @@ function Extension() {
       if (!nextList) {
         return;
       }
-      if (selectedTemplateId === pendingDeleteId) {
-        setSelectedTemplateId(null);
-      }
+      setSelectedTemplateIds((prev: string[]) => prev.filter((id: string) => id !== pendingDeleteId));
       if (view === 'editor' && editingTemplate?.id === pendingDeleteId) {
         backToMain();
       }
@@ -5414,38 +5510,50 @@ function Extension() {
     return `( ${freeShards * stepPercent}-${(freeShards + 1) * stepPercent}% Templates Free )`;
   }, [templates]);
   const emptySelectionDownloadable =
-    selectedTemplate?.fileBreak === 'selection' &&
-    !templateNeedsSelectionObjects(selectedTemplate.body);
+    selectedTemplates.length > 0 &&
+    selectedTemplates.every((t) => t.fileBreak === 'selection' && !templateNeedsSelectionObjects(t.body));
   const canDownload =
     (selectedProductList.length > 0 || noteObjects.length > 0 || emptySelectionDownloadable) &&
-    selectedTemplate !== null;
+    selectedTemplates.length > 0;
   useEffect(() => {
     const buildId = downloadBuildRef.current + 1;
     downloadBuildRef.current = buildId;
     setDownload(null);
     setDownloadFailed(false);
     if (
-      !selectedTemplate ||
+      selectedTemplates.length === 0 ||
       (selectedProductList.length === 0 && noteObjects.length === 0 && !emptySelectionDownloadable)
     ) {
       setDownloadProgress(null);
       return;
     }
-    const tpl = selectedTemplate;
+    const tpl = selectedTemplates[0];
     const prepare = async (): Promise<void> => {
       try {
-        const plan = planOutputFiles(
-          tpl.title,
-          tpl.body,
-          tpl.extension,
-          selectedProductList,
-          noteObjects,
-          tpl.fileBreak,
-          tpl.mergeCondition,
-          primaryDomain,
-          new Date(),
-          globalBodiesByTitle,
-        );
+        const now = new Date();
+        const plan =
+          selectedTemplates.length === 1
+            ? planOutputFiles(
+                tpl.title,
+                tpl.body,
+                tpl.extension,
+                selectedProductList,
+                noteObjects,
+                tpl.fileBreak,
+                tpl.mergeCondition,
+                primaryDomain,
+                now,
+                globalBodiesByTitle,
+              )
+            : planMultiTemplateDownload(
+                selectedTemplates,
+                selectedProductList,
+                noteObjects,
+                primaryDomain,
+                now,
+                globalBodiesByTitle,
+                downloadMode,
+              );
         setDownloadProgress({ done: 0, total: plan.count, packaging: false });
         const files: ZipEntry[] = [];
         for (let index = 0; index < plan.count; index++) {
@@ -5507,7 +5615,7 @@ function Extension() {
       }
     };
     prepare();
-  }, [selectedTemplate, selectedProductList, noteObjects, primaryDomain, globalBodiesByTitle]);
+  }, [selectedTemplates, selectedProductList, noteObjects, primaryDomain, globalBodiesByTitle, downloadMode]);
   const downloadBuildFailed = canDownload && downloadFailed;
   const preparingDownload = downloadProgress !== null;
   const onDownloadClick = (): void => {
@@ -5616,6 +5724,7 @@ function Extension() {
     setSelectionMissing(false);
     setCheckedSelectionProducts({});
     setCheckedSelectionNotes({});
+    setReorderMode(false);
     setView('selection');
     if (slot === 'current') {
       setSelectionDraft(selectedProductList);
@@ -5680,10 +5789,6 @@ function Extension() {
       }
       return prev.map((n) => (n.id === noteId ? { ...n, note } : n));
     });
-  };
-  const removeNoteFromDraft = (noteId: string): void => {
-    setSelectionError(null);
-    setSelectionNoteDraft((prev) => prev.filter((n) => n.id !== noteId));
   };
   const isPublicSelection = selectionSlot !== null && selectionSlot !== 'current';
   const checkedDraftProducts = selectionDraft.filter((p) => checkedSelectionProducts[p.id]);
@@ -5770,11 +5875,18 @@ function Extension() {
       });
     }
   };
-  const clearSelectionDraft = (): void => {
+  const clearCheckedFromSelectionDraft = (): void => {
     setSelectionError(null);
-    setSelectionDraft([]);
-    setSelectionNoteDraft([]);
-    setSelectionViewOrderIndex({});
+    setSelectionDraft((prev) => prev.filter((p) => !checkedSelectionProducts[p.id]));
+    setSelectionNoteDraft((prev) => prev.filter((n) => !checkedSelectionNotes[n.id]));
+    setSelectionViewOrderIndex((prev: Record<string, number>) => {
+      const next = { ...prev };
+      for (const id of Object.keys(checkedSelectionProducts)) delete next[id];
+      for (const id of Object.keys(checkedSelectionNotes)) delete next[id];
+      return next;
+    });
+    setCheckedSelectionProducts({});
+    setCheckedSelectionNotes({});
   };
   const selectionSubtitleFor = (slot: PublicSelectionSlotId): string =>
     selectionSubtitles[slot] || '';
@@ -5811,10 +5923,6 @@ function Extension() {
       renumbered[row.id] = i;
     });
     setSelectionViewOrderIndex(renumbered);
-  };
-  const removeFromSelectionDraft = (productId: string): void => {
-    setSelectionError(null);
-    setSelectionDraft((prev) => prev.filter((p) => p.id !== productId));
   };
   const loadSelectionIntoCurrent = (): void => {
     const productsToLoad = isPublicSelection ? checkedDraftProducts : selectionDraft;
@@ -6326,8 +6434,8 @@ function Extension() {
         >
           Refresh
         </s-button>
-        <s-button onClick={clearSelectionDraft} disabled={selectionDraft.length === 0}>
-          Clear Selection
+        <s-button onClick={clearCheckedFromSelectionDraft} disabled={checkedItemCount === 0}>
+          Clear Selected
         </s-button>
         <s-button
           onClick={loadSelectionIntoCurrent}
@@ -6348,6 +6456,13 @@ function Extension() {
         </s-button>
         <s-button loading={selectionSaving} onClick={saveSelectionDraft}>
           Save
+        </s-button>
+        <s-button
+          variant={reorderMode ? 'primary' : undefined}
+          accessibilityLabel={reorderMode ? 'Hide reorder arrows' : 'Show reorder arrows'}
+          onClick={() => setReorderMode((on: boolean) => !on)}
+        >
+          Reorder
         </s-button>
       </s-stack>
 
@@ -6393,30 +6508,27 @@ function Extension() {
               value={selectionSearch}
               onInput={(e: any) => setSelectionSearch(e.currentTarget.value)}
             />
-            {isPublicSelection ? (
-              <s-stack direction="inline" gap="small" alignItems="center">
-                <s-button
-                  onClick={toggleSelectAllInSelection}
-                  disabled={selectionDraft.length + selectionNoteDraft.length === 0}
-                >
-                  {allSelectionItemsChecked ? 'Deselect All' : 'Select All'}
-                </s-button>
-                <s-text color="subdued">{checkedItemCount} selected</s-text>
-              </s-stack>
-            ) : null}
+            <s-stack direction="inline" gap="small" alignItems="center">
+              <s-button
+                onClick={toggleSelectAllInSelection}
+                disabled={selectionDraft.length + selectionNoteDraft.length === 0}
+              >
+                {allSelectionItemsChecked ? 'Deselect All' : 'Select All'}
+              </s-button>
+              <s-text color="subdued">{checkedItemCount} selected</s-text>
+            </s-stack>
           </s-stack>
         </s-box>
 
         
         <s-table loading={selectionLoading}>
           <s-table-header-row>
-            {isPublicSelection ? <s-table-header>Use</s-table-header> : null}
+            <s-table-header>Use</s-table-header>
             <s-table-header listSlot="primary">Item</s-table-header>
             <s-table-header>Handle</s-table-header>
             <s-table-header>Qty</s-table-header>
             <s-table-header>Note</s-table-header>
-            <s-table-header>Order</s-table-header>
-            <s-table-header>Remove</s-table-header>
+            {reorderMode ? <s-table-header>Order</s-table-header> : null}
           </s-table-header-row>
           <s-table-body>
             {selectionRowsFiltered.length === 0 && !selectionLoading ? (
@@ -6432,8 +6544,7 @@ function Extension() {
                 <s-table-cell />
                 <s-table-cell />
                 <s-table-cell />
-                <s-table-cell />
-                {isPublicSelection ? <s-table-cell /> : null}
+                {reorderMode ? <s-table-cell /> : null}
               </s-table-row>
             ) : (
               selectionRowsFiltered.map((row: SelectionRow) => {
@@ -6442,10 +6553,10 @@ function Extension() {
                 const label = row.kind === 'product' ? row.product.title : 'Note';
                 return (
                   <s-table-row key={row.id}>
-                    {isPublicSelection ? (
+                    {(
                       <s-table-cell>
                         <s-checkbox
-                          accessibilityLabel={`Include ${label} when loading`}
+                          accessibilityLabel={`Select ${label}`}
                           checked={Boolean(
                             row.kind === 'product'
                               ? checkedSelectionProducts[row.id]
@@ -6458,7 +6569,7 @@ function Extension() {
                           }
                         />
                       </s-table-cell>
-                    ) : null}
+                    )}
                     <s-table-cell>
                       {row.kind === 'product' ? (
                         <s-stack direction="inline" gap="small" alignItems="center">
@@ -6529,6 +6640,7 @@ function Extension() {
                         }
                       />
                     </s-table-cell>
+                    {reorderMode ? (
                     <s-table-cell>
                       
                       <s-stack direction="inline" gap="small-400" alignItems="center">
@@ -6548,18 +6660,7 @@ function Extension() {
                         />
                       </s-stack>
                     </s-table-cell>
-                    <s-table-cell>
-                      <s-button
-                        icon="x"
-                        variant="tertiary"
-                        accessibilityLabel={`Remove ${label}`}
-                        onClick={() =>
-                          row.kind === 'product'
-                            ? removeFromSelectionDraft(row.id)
-                            : removeNoteFromDraft(row.id)
-                        }
-                      />
-                    </s-table-cell>
+                    ) : null}
                   </s-table-row>
                 );
               })
@@ -6890,7 +6991,7 @@ function Extension() {
               </s-table-header-row>
               <s-table-body>
                 {templateGroups.list.map((tpl) => {
-                  const isSelected = tpl.id === selectedTemplateId;
+                  const isSelected = selectedTemplateIds.includes(tpl.id);
                   const selectId = rowDomId('template-select', tpl.id);
                   return (
                     <s-table-row key={tpl.id} clickDelegate={selectId}>
@@ -7158,10 +7259,48 @@ function Extension() {
                 Syntax Guide
               </s-button>
               <s-button onClick={openGlobalVarsPage}>Global Vars</s-button>
+              <s-button commandFor="download-settings-modal" command="--show">
+                Download Settings
+              </s-button>
             </s-stack>
           </s-box>
         </s-section>
       </s-grid>
+
+      <s-modal id="download-settings-modal" heading="Download Settings">
+        <s-stack gap="base">
+          <s-text>How should a download with several templates selected be packaged?</s-text>
+          <s-choice-list
+            label="Multiple templates"
+            labelAccessibilityVisibility="exclusive"
+            name="download-mode"
+            onChange={(e: any) => {
+              const value = (e.currentTarget?.values ?? e.target?.values ?? [])[0];
+              if (value === 'grouped' || value === 'alternate') setDownloadMode(value);
+            }}
+          >
+            <s-choice value="grouped" selected={downloadMode === 'grouped'}>
+              Group downloads by Template
+            </s-choice>
+            <s-choice value="alternate" selected={downloadMode === 'alternate'}>
+              Alternate Templates Every Selection
+            </s-choice>
+          </s-choice-list>
+          <s-text color="subdued">
+            {downloadMode === 'grouped'
+              ? 'One zip (multiple-templates-DATE) holding each template’s usual files or folder.'
+              : 'Files are numbered so each product’s files from every template sit together; templates of different types go in separate folders.'}
+          </s-text>
+        </s-stack>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          commandFor="download-settings-modal"
+          command="--hide"
+        >
+          Done
+        </s-button>
+      </s-modal>
 
       <s-modal id="syntax-guide-modal" heading="Syntax Guide" size="large">
         <s-text-area

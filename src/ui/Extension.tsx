@@ -187,9 +187,14 @@ function Extension() {
   const [templateSort, setTemplateSort] = useState<'new-old' | 'old-new' | 'a-z' | 'z-a'>(
     'new-old',
   );
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
+  // Selection view: whether the up/down reorder arrows are shown.
+  // Settings > Download Settings: how a multi-template download is packaged.
+  const [downloadMode, setDownloadMode] = useState<MultiDownloadMode>('grouped');
+  const [reorderMode, setReorderMode] = useState<boolean>(false);
   // The last template click (double-click detection).
   const lastTemplateClickRef = useRef<ClickRecord | null>(null);
+  const templateWasSelectedRef = useRef<boolean>(false);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
   const [pinningId, setPinningId] = useState<string | null>(null);
@@ -285,9 +290,10 @@ function Extension() {
     () => selectedProductList.reduce((sum: number, p: ProductData) => sum + p.variants.length, 0),
     [selectedProductList],
   );
-  const selectedTemplate = useMemo(
-    () => templates.find((t) => t.id === selectedTemplateId) || null,
-    [templates, selectedTemplateId],
+  // Every ticked template, in the order the template list holds them.
+  const selectedTemplates = useMemo(
+    () => templates.filter((t) => selectedTemplateIds.includes(t.id)),
+    [templates, selectedTemplateIds],
   );
   // Session 24: the template the delete-confirmation modal is about to delete, if any -- looked up
   // once here so both the modal's confirmation text (shows its title) and confirmDelete's own
@@ -1076,7 +1082,7 @@ function Extension() {
   // Handlers: template list & editor navigation
   // --------------------------------------------------------------------------------------------
   const clearTemplateSelection = (): void => {
-    setSelectedTemplateId(null);
+    setSelectedTemplateIds([]);
   };
 
   const openNewTemplate = (): void => {
@@ -1344,13 +1350,26 @@ function Extension() {
   // Called when a template row is clicked (the row's clickDelegate is the clickable holding its name): one click
   // selects it, two quick clicks on the same row open it in the editor.
   const handleTemplateRowClick = (tpl: TemplateData): void => {
-    const click = registerClick(lastTemplateClickRef.current, tpl.id, Date.now());
+    const before = lastTemplateClickRef.current;
+    const click = registerClick(before, tpl.id, Date.now());
     lastTemplateClickRef.current = click.next;
     if (click.isDouble) {
+      // The first click of the pair already toggled this template; put it back before opening the editor.
+      const wasSelected = templateWasSelectedRef.current;
+      setSelectedTemplateIds((prev: string[]) => {
+        const has = prev.includes(tpl.id);
+        if (has === wasSelected) return prev;
+        return wasSelected ? [...prev, tpl.id] : prev.filter((id: string) => id !== tpl.id);
+      });
       openEditTemplate(tpl);
       return;
     }
-    setSelectedTemplateId(tpl.id);
+    // The same physical click delivered twice must not toggle twice.
+    if (before !== null && click.next === before) return;
+    templateWasSelectedRef.current = selectedTemplateIds.includes(tpl.id);
+    setSelectedTemplateIds((prev: string[]) =>
+      prev.includes(tpl.id) ? prev.filter((id: string) => id !== tpl.id) : [...prev, tpl.id],
+    );
   };
 
   const openEditTemplate = (tpl: TemplateData): void => {
@@ -1701,9 +1720,7 @@ function Extension() {
       if (!nextList) {
         return;
       }
-      if (selectedTemplateId === pendingDeleteId) {
-        setSelectedTemplateId(null);
-      }
+      setSelectedTemplateIds((prev: string[]) => prev.filter((id: string) => id !== pendingDeleteId));
       // Session 24: deleting from the NEW editor-header delete button (as opposed to the template
       // list's own menu action) means the template just deleted is the one currently open here --
       // nothing left to edit, so return to the main view the same way Back does.
@@ -1821,11 +1838,11 @@ function Extension() {
   // are unaffected either way -- there is nothing to loop over with zero objects regardless of what
   // the body contains, so they still require a non-empty selection.
   const emptySelectionDownloadable =
-    selectedTemplate?.fileBreak === 'selection' &&
-    !templateNeedsSelectionObjects(selectedTemplate.body);
+    selectedTemplates.length > 0 &&
+    selectedTemplates.every((t) => t.fileBreak === 'selection' && !templateNeedsSelectionObjects(t.body));
   const canDownload =
     (selectedProductList.length > 0 || noteObjects.length > 0 || emptySelectionDownloadable) &&
-    selectedTemplate !== null;
+    selectedTemplates.length > 0;
 
   // Reactively compute the download href + filename from the current selection so a single click on
   // the download link downloads the file(s) directly (browser-native), with no separate generate step.
@@ -1838,28 +1855,40 @@ function Extension() {
     setDownload(null);
     setDownloadFailed(false);
     if (
-      !selectedTemplate ||
+      selectedTemplates.length === 0 ||
       (selectedProductList.length === 0 && noteObjects.length === 0 && !emptySelectionDownloadable)
     ) {
       setDownloadProgress(null);
       return;
     }
-    const tpl = selectedTemplate;
+    const tpl = selectedTemplates[0];
     const prepare = async (): Promise<void> => {
       try {
         // A single Date captured once for this download, so every generated file shares the same date.
-        const plan = planOutputFiles(
-          tpl.title,
-          tpl.body,
-          tpl.extension,
-          selectedProductList,
-          noteObjects,
-          tpl.fileBreak,
-          tpl.mergeCondition,
-          primaryDomain,
-          new Date(),
-          globalBodiesByTitle,
-        );
+        const now = new Date();
+        const plan =
+          selectedTemplates.length === 1
+            ? planOutputFiles(
+                tpl.title,
+                tpl.body,
+                tpl.extension,
+                selectedProductList,
+                noteObjects,
+                tpl.fileBreak,
+                tpl.mergeCondition,
+                primaryDomain,
+                now,
+                globalBodiesByTitle,
+              )
+            : planMultiTemplateDownload(
+                selectedTemplates,
+                selectedProductList,
+                noteObjects,
+                primaryDomain,
+                now,
+                globalBodiesByTitle,
+                downloadMode,
+              );
         setDownloadProgress({ done: 0, total: plan.count, packaging: false });
         const files: ZipEntry[] = [];
         for (let index = 0; index < plan.count; index++) {
@@ -1936,7 +1965,7 @@ function Extension() {
       }
     };
     prepare();
-  }, [selectedTemplate, selectedProductList, noteObjects, primaryDomain, globalBodiesByTitle]);
+  }, [selectedTemplates, selectedProductList, noteObjects, primaryDomain, globalBodiesByTitle, downloadMode]);
 
   // Whether the current selection is valid but the content could not be built.
   const downloadBuildFailed = canDownload && downloadFailed;
@@ -2078,6 +2107,7 @@ function Extension() {
     // Subset checkboxes always start empty: opening a selection selects nothing by default.
     setCheckedSelectionProducts({});
     setCheckedSelectionNotes({});
+    setReorderMode(false);
     setView('selection');
     if (slot === 'current') {
       setSelectionDraft(selectedProductList);
@@ -2165,12 +2195,6 @@ function Extension() {
       }
       return prev.map((n) => (n.id === noteId ? { ...n, note } : n));
     });
-  };
-
-  // Remove ONE note object from the open selection's working draft.
-  const removeNoteFromDraft = (noteId: string): void => {
-    setSelectionError(null);
-    setSelectionNoteDraft((prev) => prev.filter((n) => n.id !== noteId));
   };
 
   // Whether the open selection is one of the saved public slots (the subset checkboxes and the
@@ -2275,11 +2299,19 @@ function Extension() {
     }
   };
 
-  const clearSelectionDraft = (): void => {
+  // Remove the CHECKED products and notes from the open selection's draft (persisted on Save).
+  const clearCheckedFromSelectionDraft = (): void => {
     setSelectionError(null);
-    setSelectionDraft([]);
-    setSelectionNoteDraft([]);
-    setSelectionViewOrderIndex({});
+    setSelectionDraft((prev) => prev.filter((p) => !checkedSelectionProducts[p.id]));
+    setSelectionNoteDraft((prev) => prev.filter((n) => !checkedSelectionNotes[n.id]));
+    setSelectionViewOrderIndex((prev: Record<string, number>) => {
+      const next = { ...prev };
+      for (const id of Object.keys(checkedSelectionProducts)) delete next[id];
+      for (const id of Object.keys(checkedSelectionNotes)) delete next[id];
+      return next;
+    });
+    setCheckedSelectionProducts({});
+    setCheckedSelectionNotes({});
   };
 
   const selectionSubtitleFor = (slot: PublicSelectionSlotId): string =>
@@ -2333,13 +2365,6 @@ function Extension() {
       renumbered[row.id] = i;
     });
     setSelectionViewOrderIndex(renumbered);
-  };
-
-  // Remove ONE product from the open selection's working draft. The change is a draft edit; it is
-  // only persisted when the merchant uses Save.
-  const removeFromSelectionDraft = (productId: string): void => {
-    setSelectionError(null);
-    setSelectionDraft((prev) => prev.filter((p) => p.id !== productId));
   };
 
   // Load this selection into the main page. In a PUBLIC selection only the CHECKED products and
@@ -2963,8 +2988,8 @@ function Extension() {
         >
           Refresh
         </s-button>
-        <s-button onClick={clearSelectionDraft} disabled={selectionDraft.length === 0}>
-          Clear Selection
+        <s-button onClick={clearCheckedFromSelectionDraft} disabled={checkedItemCount === 0}>
+          Clear Selected
         </s-button>
         <s-button
           onClick={loadSelectionIntoCurrent}
@@ -2985,6 +3010,13 @@ function Extension() {
         </s-button>
         <s-button loading={selectionSaving} onClick={saveSelectionDraft}>
           Save
+        </s-button>
+        <s-button
+          variant={reorderMode ? 'primary' : undefined}
+          accessibilityLabel={reorderMode ? 'Hide reorder arrows' : 'Show reorder arrows'}
+          onClick={() => setReorderMode((on: boolean) => !on)}
+        >
+          Reorder
         </s-button>
       </s-stack>
 
@@ -3030,17 +3062,15 @@ function Extension() {
               value={selectionSearch}
               onInput={(e: any) => setSelectionSearch(e.currentTarget.value)}
             />
-            {isPublicSelection ? (
-              <s-stack direction="inline" gap="small" alignItems="center">
-                <s-button
-                  onClick={toggleSelectAllInSelection}
-                  disabled={selectionDraft.length + selectionNoteDraft.length === 0}
-                >
-                  {allSelectionItemsChecked ? 'Deselect All' : 'Select All'}
-                </s-button>
-                <s-text color="subdued">{checkedItemCount} selected</s-text>
-              </s-stack>
-            ) : null}
+            <s-stack direction="inline" gap="small" alignItems="center">
+              <s-button
+                onClick={toggleSelectAllInSelection}
+                disabled={selectionDraft.length + selectionNoteDraft.length === 0}
+              >
+                {allSelectionItemsChecked ? 'Deselect All' : 'Select All'}
+              </s-button>
+              <s-text color="subdued">{checkedItemCount} selected</s-text>
+            </s-stack>
           </s-stack>
         </s-box>
 
@@ -3050,13 +3080,12 @@ function Extension() {
               regardless of actual add order. */}
         <s-table loading={selectionLoading}>
           <s-table-header-row>
-            {isPublicSelection ? <s-table-header>Use</s-table-header> : null}
+            <s-table-header>Use</s-table-header>
             <s-table-header listSlot="primary">Item</s-table-header>
             <s-table-header>Handle</s-table-header>
             <s-table-header>Qty</s-table-header>
             <s-table-header>Note</s-table-header>
-            <s-table-header>Order</s-table-header>
-            <s-table-header>Remove</s-table-header>
+            {reorderMode ? <s-table-header>Order</s-table-header> : null}
           </s-table-header-row>
           <s-table-body>
             {selectionRowsFiltered.length === 0 && !selectionLoading ? (
@@ -3072,8 +3101,7 @@ function Extension() {
                 <s-table-cell />
                 <s-table-cell />
                 <s-table-cell />
-                <s-table-cell />
-                {isPublicSelection ? <s-table-cell /> : null}
+                {reorderMode ? <s-table-cell /> : null}
               </s-table-row>
             ) : (
               selectionRowsFiltered.map((row: SelectionRow) => {
@@ -3082,10 +3110,10 @@ function Extension() {
                 const label = row.kind === 'product' ? row.product.title : 'Note';
                 return (
                   <s-table-row key={row.id}>
-                    {isPublicSelection ? (
+                    {(
                       <s-table-cell>
                         <s-checkbox
-                          accessibilityLabel={`Include ${label} when loading`}
+                          accessibilityLabel={`Select ${label}`}
                           checked={Boolean(
                             row.kind === 'product'
                               ? checkedSelectionProducts[row.id]
@@ -3098,7 +3126,7 @@ function Extension() {
                           }
                         />
                       </s-table-cell>
-                    ) : null}
+                    )}
                     <s-table-cell>
                       {row.kind === 'product' ? (
                         <s-stack direction="inline" gap="small" alignItems="center">
@@ -3169,6 +3197,7 @@ function Extension() {
                         }
                       />
                     </s-table-cell>
+                    {reorderMode ? (
                     <s-table-cell>
                       {/* Reordering uses move controls because Polaris has no drag-and-drop
                             component and the sandbox exposes no HTML5 drag events. Moves are
@@ -3191,18 +3220,7 @@ function Extension() {
                         />
                       </s-stack>
                     </s-table-cell>
-                    <s-table-cell>
-                      <s-button
-                        icon="x"
-                        variant="tertiary"
-                        accessibilityLabel={`Remove ${label}`}
-                        onClick={() =>
-                          row.kind === 'product'
-                            ? removeFromSelectionDraft(row.id)
-                            : removeNoteFromDraft(row.id)
-                        }
-                      />
-                    </s-table-cell>
+                    ) : null}
                   </s-table-row>
                 );
               })
@@ -3548,7 +3566,7 @@ function Extension() {
               </s-table-header-row>
               <s-table-body>
                 {templateGroups.list.map((tpl) => {
-                  const isSelected = tpl.id === selectedTemplateId;
+                  const isSelected = selectedTemplateIds.includes(tpl.id);
                   const selectId = rowDomId('template-select', tpl.id);
                   return (
                     <s-table-row key={tpl.id} clickDelegate={selectId}>
@@ -3842,10 +3860,48 @@ function Extension() {
                 Syntax Guide
               </s-button>
               <s-button onClick={openGlobalVarsPage}>Global Vars</s-button>
+              <s-button commandFor="download-settings-modal" command="--show">
+                Download Settings
+              </s-button>
             </s-stack>
           </s-box>
         </s-section>
       </s-grid>
+
+      <s-modal id="download-settings-modal" heading="Download Settings">
+        <s-stack gap="base">
+          <s-text>How should a download with several templates selected be packaged?</s-text>
+          <s-choice-list
+            label="Multiple templates"
+            labelAccessibilityVisibility="exclusive"
+            name="download-mode"
+            onChange={(e: any) => {
+              const value = (e.currentTarget?.values ?? e.target?.values ?? [])[0];
+              if (value === 'grouped' || value === 'alternate') setDownloadMode(value);
+            }}
+          >
+            <s-choice value="grouped" selected={downloadMode === 'grouped'}>
+              Group downloads by Template
+            </s-choice>
+            <s-choice value="alternate" selected={downloadMode === 'alternate'}>
+              Alternate Templates Every Selection
+            </s-choice>
+          </s-choice-list>
+          <s-text color="subdued">
+            {downloadMode === 'grouped'
+              ? 'One zip (multiple-templates-DATE) holding each template’s usual files or folder.'
+              : 'Files are numbered so each product’s files from every template sit together; templates of different types go in separate folders.'}
+          </s-text>
+        </s-stack>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          commandFor="download-settings-modal"
+          command="--hide"
+        >
+          Done
+        </s-button>
+      </s-modal>
 
       <s-modal id="syntax-guide-modal" heading="Syntax Guide" size="large">
         <s-text-area

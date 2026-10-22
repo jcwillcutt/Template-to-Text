@@ -83,9 +83,14 @@ describe('template list', () => {
   });
   it('a click selects and a double click opens the editor, via a ref-tracked click record', () => {
     const handler = between('const handleTemplateRowClick', 'const openEditTemplate');
-    expect(handler).toContain('registerClick(lastTemplateClickRef.current, tpl.id, Date.now())');
+    expect(handler).toContain('registerClick(before, tpl.id, Date.now())');
     expect(handler).toContain('openEditTemplate(tpl)');
-    expect(handler).toContain('setSelectedTemplateId(tpl.id)');
+  });
+  it('a click toggles the template in a multi-selection; a double click undoes that toggle before opening the editor', () => {
+    const handler = between('const handleTemplateRowClick', 'const openEditTemplate');
+    expect(handler).toContain('prev.includes(tpl.id) ? prev.filter((id: string) => id !== tpl.id) : [...prev, tpl.id]');
+    expect(handler).toContain('templateWasSelectedRef.current');
+    expect(handler).toContain('if (before !== null && click.next === before) return;');
   });
   it('the actions button and menu live in their own cell (secondary actions)', () => {
     expect(list).toContain('commandFor={`tpl-menu-${tpl.id}`}');
@@ -127,5 +132,36 @@ describe('refresh and selection variants', () => {
   });
   it('the Selection view shows lists every variant of a multi-variant product with a checkbox for the included ones', () => {
     expect(src).toContain('setSelectionDraftVariant(row.product.id, v.id, e.currentTarget.checked)');
+  });
+});
+
+describe('multi-template download and selection view controls', () => {
+  it('downloads several selected templates through planMultiTemplateDownload using the Download Settings mode', () => {
+    expect(src).toContain('planMultiTemplateDownload(');
+    expect(src).toContain('downloadMode,');
+    expect(src).toContain('<s-choice value="grouped"');
+    expect(src).toContain('<s-choice value="alternate"');
+    expect(src).toContain('Group downloads by Template');
+    expect(src).toContain('Alternate Templates Every Selection');
+  });
+  it('Settings has a Download Settings button opening the modal', () => {
+    const settings = between('const renderSettingsView', 'const renderGlobalVarsView');
+    expect(settings).toContain('commandFor="download-settings-modal"');
+    expect(settings).toContain('Download Settings');
+  });
+  it('the Selection view has no remove-X buttons, offers Clear Selected, checkboxes everywhere, and a Reorder toggle after Save', () => {
+    const view = between('const renderSelectionView', 'const renderMainView');
+    expect(view).not.toContain('icon="x"');
+    expect(view).not.toContain('Clear Selection');
+    expect(view).toContain('Clear Selected');
+    expect(view).toContain('onClick={clearCheckedFromSelectionDraft}');
+    expect(view).not.toContain('isPublicSelection ? <s-table-header>Use');
+    expect(view.indexOf('Save\n        </s-button>')).toBeLessThan(view.indexOf('Reorder\n        </s-button>'));
+    expect(view).toContain("variant={reorderMode ? 'primary' : undefined}");
+    expect(view).toContain('{reorderMode ? (');
+    expect(view).toContain('{reorderMode ? <s-table-header>Order</s-table-header> : null}');
+  });
+  it('the reorder arrows start hidden every time a selection opens', () => {
+    expect(src).toMatch(/setReorderMode\(false\);\s*setView\('selection'\);/);
   });
 });

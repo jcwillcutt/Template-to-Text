@@ -4,3 +4,4 @@ export { formatDateTime } from './datetime';
 export { stripComments, templateNeedsSelectionObjects, IDENTIFIER_REGEX } from './lexicon';
 export { mediaTypeForExtension, buildZipBase64, type ZipEntry } from './zip';
 export { planOutputFiles, buildOutputFiles, yieldToBrowser, type FilePlan, type OutputFiles } from './plan';
+export { planMultiTemplateDownload, type MultiDownloadMode, type MultiTemplateInput } from './multi';
