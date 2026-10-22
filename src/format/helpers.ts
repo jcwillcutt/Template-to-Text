@@ -28,11 +28,11 @@ export function formatSelectionCount(variantCount: number, noteCount: number): s
 // page in a new tab" link. Returns null when either piece isn't available yet (primaryDomain
 // hasn't loaded, or the id isn't in the expected gid shape) so the caller can fall back to plain,
 // unlinked text instead of rendering a broken link.
-export function adminProductUrl(productId: string, primaryDomain: string): string | null {
-  if (!primaryDomain) return null;
+// In-admin deep link to a product's own page (the admin opens it itself, rather than a new browser tab).
+export function adminProductUrl(productId: string, _primaryDomain?: string): string | null {
   const match = /\/Product\/(\d+)$/.exec(productId);
   if (!match) return null;
-  return `https://${primaryDomain}/admin/products/${match[1]}`;
+  return `shopify://admin/products/${match[1]}`;
 }
 
 export function slugify(input: string): string {

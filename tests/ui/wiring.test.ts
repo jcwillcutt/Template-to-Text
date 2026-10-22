@@ -64,7 +64,7 @@ describe('product list', () => {
     expect(row).toContain("rowDomId('product-select', p.id)");
   });
   it('the title is still a link to the admin product page', () => {
-    expect(row).toContain('<s-link href={url} target="_blank">');
+    expect(row).toContain('<s-link href={url} onClick={(e: any) => e.stopPropagation()}>');
   });
   it('title, handle, note and variants share one flexible column', () => {
     expect(row).toContain('gridTemplateColumns="auto 1fr"');
@@ -163,5 +163,12 @@ describe('multi-template download and selection view controls', () => {
   });
   it('the reorder arrows start hidden every time a selection opens', () => {
     expect(src).toMatch(/setReorderMode\(false\);\s*setView\('selection'\);/);
+  });
+});
+
+describe('product title links', () => {
+  it('open the product through an in-admin shopify:// link without a new browser tab, and do not toggle the row', () => {
+    expect(src).not.toContain('target="_blank"');
+    expect(src.match(/onClick=\{\(e: any\) => e\.stopPropagation\(\)\}/g)?.length).toBeGreaterThanOrEqual(3);
   });
 });

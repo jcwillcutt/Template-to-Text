@@ -588,11 +588,10 @@ function globalVarBodyPreview(body: string): string {
 function formatSelectionCount(variantCount: number, noteCount: number): string {
   return noteCount === 0 ? `(${variantCount})` : `(${variantCount}/${noteCount})`;
 }
-function adminProductUrl(productId: string, primaryDomain: string): string | null {
-  if (!primaryDomain) return null;
+function adminProductUrl(productId: string, _primaryDomain?: string): string | null {
   const match = /\/Product\/(\d+)$/.exec(productId);
   if (!match) return null;
-  return `https://${primaryDomain}/admin/products/${match[1]}`;
+  return `shopify://admin/products/${match[1]}`;
 }
 function slugify(input: string): string {
   const s = input
@@ -5102,7 +5101,7 @@ function Extension() {
               <s-stack direction="inline" gap="small" alignItems="center">
                 {p.imageUrl ? <s-thumbnail size="small" src={p.imageUrl} alt={p.title} /> : null}
                 {url ? (
-                  <s-link href={url} target="_blank">
+                  <s-link href={url} onClick={(e: any) => e.stopPropagation()}>
                     <s-text type="strong">{p.title}</s-text>
                   </s-link>
                 ) : (
@@ -6584,7 +6583,7 @@ function Extension() {
                             {adminProductUrl(row.product.id, primaryDomain) ? (
                               <s-link
                                 href={adminProductUrl(row.product.id, primaryDomain)!}
-                                target="_blank"
+                                onClick={(e: any) => e.stopPropagation()}
                               >
                                 <s-text type="strong">{row.product.title}</s-text>
                               </s-link>
@@ -7217,7 +7216,7 @@ function Extension() {
                               {adminProductUrl(row.product.id, primaryDomain) ? (
                                 <s-link
                                   href={adminProductUrl(row.product.id, primaryDomain)!}
-                                  target="_blank"
+                                  onClick={(e: any) => e.stopPropagation()}
                                 >
                                   <s-text type="strong">{row.product.title}</s-text>
                                 </s-link>

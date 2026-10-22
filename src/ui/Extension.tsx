@@ -1302,7 +1302,7 @@ function Extension() {
               <s-stack direction="inline" gap="small" alignItems="center">
                 {p.imageUrl ? <s-thumbnail size="small" src={p.imageUrl} alt={p.title} /> : null}
                 {url ? (
-                  <s-link href={url} target="_blank">
+                  <s-link href={url} onClick={(e: any) => e.stopPropagation()}>
                     <s-text type="strong">{p.title}</s-text>
                   </s-link>
                 ) : (
@@ -3141,7 +3141,7 @@ function Extension() {
                             {adminProductUrl(row.product.id, primaryDomain) ? (
                               <s-link
                                 href={adminProductUrl(row.product.id, primaryDomain)!}
-                                target="_blank"
+                                onClick={(e: any) => e.stopPropagation()}
                               >
                                 <s-text type="strong">{row.product.title}</s-text>
                               </s-link>
@@ -3818,7 +3818,7 @@ function Extension() {
                               {adminProductUrl(row.product.id, primaryDomain) ? (
                                 <s-link
                                   href={adminProductUrl(row.product.id, primaryDomain)!}
-                                  target="_blank"
+                                  onClick={(e: any) => e.stopPropagation()}
                                 >
                                   <s-text type="strong">{row.product.title}</s-text>
                                 </s-link>
