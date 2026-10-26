@@ -1790,6 +1790,18 @@ function Extension() {
     if (nextList) setTemplates(nextList);
   };
 
+  const toggleFolderPin = async (folder: TemplateFolder): Promise<void> => {
+    setFolderError(null);
+    const now = Date.now();
+    await mutateFolders(
+      (current) =>
+        current.map((f) =>
+          f.id === folder.id ? { ...f, pinned: f.pinned !== true, pinnedAt: f.pinned !== true ? now : null } : f,
+        ),
+      setFolderError,
+    );
+  };
+
   // Folder menu: move every SELECTED template that is not in this folder into it (taking it out of any other
   // folder), or take every SELECTED template that is in this folder out of it. Other templates are untouched.
   const addSelectedToFolder = async (folderId: string): Promise<void> => {
@@ -1922,61 +1934,11 @@ function Extension() {
   // --------------------------------------------------------------------------------------------
   // Derived view data: template list grouping, metafield tokens, storage label
   // --------------------------------------------------------------------------------------------
-  // The ordered template list to render, plus the index of the row that the pinned / unpinned
-  // separator is drawn immediately above (-1 when no separator should appear).
-  const templateGroups = useMemo<{
-    list: TemplateData[];
-    dividerIndex: number;
-    folderBlocks: { folder: TemplateFolder; list: TemplateData[] }[];
-  }>(() => {
-    const term = templateSearch.trim().toLowerCase();
-    const matched = !term
-      ? templates
-      : templates.filter(
-          (t) =>
-            t.title.toLowerCase().includes(term) ||
-            sanitizeExtension(t.extension).toLowerCase().includes(term),
-        );
-    // Templates are stored in creation order (oldest first, newest appended last), so 'old-new'
-    // keeps that order as-is and 'new-old' reverses it.
-    const applySelectedSort = (list: TemplateData[]): TemplateData[] => {
-      const sorted = [...list];
-      if (templateSort === 'new-old') {
-        sorted.reverse();
-      } else if (templateSort === 'a-z') {
-        sorted.sort((a, b) => a.title.localeCompare(b.title));
-      } else if (templateSort === 'z-a') {
-        sorted.sort((a, b) => b.title.localeCompare(a.title));
-      }
-      return sorted;
-    };
-    // While a search term is active, pinning and folders are ignored: matches are one flat list.
-    if (term) {
-      return { list: applySelectedSort(matched), dividerIndex: -1, folderBlocks: [] };
-    }
-    // Pinned templates ALWAYS sort by when they were pinned, most recent first, regardless of the
-    // selected sort order. A template pinned before the timestamp was recorded has no `pinnedAt`
-    // and sorts to the bottom of the pinned group. The selected sort order applies to the rest.
-    const pinnedFirst = (list: TemplateData[]): { ordered: TemplateData[]; pinnedCount: number; restCount: number } => {
-      const pinned = list
-        .filter((t) => t.pinned === true)
-        .sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0));
-      const rest = applySelectedSort(list.filter((t) => t.pinned !== true));
-      return { ordered: [...pinned, ...rest], pinnedCount: pinned.length, restCount: rest.length };
-    };
-    const folderIds = new Set(templateFolders.map((f) => f.id));
-    // A template pointing at a folder that no longer exists is shown in the main list.
-    const root = pinnedFirst(matched.filter((t) => !t.folderId || !folderIds.has(t.folderId)));
-    const folderBlocks = templateFolders.map((folder) => ({
-      folder,
-      list: pinnedFirst(matched.filter((t) => t.folderId === folder.id)).ordered,
-    }));
-    return {
-      list: root.ordered,
-      dividerIndex: root.pinnedCount > 0 && root.restCount > 0 ? root.pinnedCount : -1,
-      folderBlocks,
-    };
-  }, [templates, templateSearch, templateSort, templateFolders]);
+  // The ordered template list to render (see orderTemplateList).
+  const templateGroups = useMemo<{ items: TemplateListItem[] }>(
+    () => ({ items: orderTemplateList(templates, templateFolders, templateSearch, templateSort) }),
+    [templates, templateSearch, templateSort, templateFolders],
+  );
 
   // Always show the union of metafields across ALL currently loaded products, regardless of selection,
   // so every known metafield key is available to insert.
@@ -3519,6 +3481,80 @@ function Extension() {
     );
   };
 
+  const renderFolderRow = (folder: TemplateFolder, open: boolean) => {
+    const toggleId = rowDomId('folder-toggle', folder.id);
+    return (
+                    <s-table-row key={`folder-${folder.id}`} clickDelegate={toggleId}>
+                      <s-table-cell>
+                        <s-clickable id={toggleId} onClick={() => toggleFolderOpen(folder.id)}>
+                          <s-stack direction="inline" gap="small" alignItems="center">
+                            <s-heading>{open ? '📂' : '📁'}</s-heading>
+                            <s-text type="strong">{folder.name}</s-text>
+                          </s-stack>
+                        </s-clickable>
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-button
+                          icon="menu-horizontal"
+                          accessibilityLabel={`Actions for folder ${folder.name}`}
+                          commandFor={`folder-menu-${folder.id}`}
+                        />
+                        <s-menu id={`folder-menu-${folder.id}`} accessibilityLabel="Folder actions">
+                          <s-button
+                            icon={folder.pinned ? 'pin-remove' : 'pin'}
+                            onClick={() => toggleFolderPin(folder)}
+                          >
+                            {folder.pinned ? 'Unpin folder' : 'Pin folder'}
+                          </s-button>
+                          <s-button
+                            disabled={selectedTemplateIds.length === 0}
+                            onClick={() => addSelectedToFolder(folder.id)}
+                          >
+                            Add selected to folder
+                          </s-button>
+                          <s-button
+                            disabled={selectedTemplateIds.length === 0}
+                            onClick={() => removeSelectedFromFolder(folder.id)}
+                          >
+                            Remove selected from folder
+                          </s-button>
+                          <s-button
+                            commandFor="folder-name-modal"
+                            command="--show"
+                            onClick={() => openRenameFolder(folder)}
+                          >
+                            Rename folder
+                          </s-button>
+                          <s-button
+                            tone="critical"
+                            commandFor="delete-folder-modal"
+                            command="--show"
+                            onClick={() => setPendingDeleteFolderId(folder.id)}
+                          >
+                            Delete folder
+                          </s-button>
+                        </s-menu>
+                      </s-table-cell>
+                    </s-table-row>
+    );
+  };
+
+  // Every row of the template list as ONE flat array (a folder row, then its templates when it is open), so the rows
+  // keep their order inside the table body.
+  const renderTemplateRows = () => {
+    const rows: any[] = [];
+    for (const item of templateGroups.items) {
+      if (item.kind === 'template') {
+        rows.push(renderTemplateRow(item.tpl, false));
+        continue;
+      }
+      const open = expandedFolderIds.includes(item.folder.id);
+      rows.push(renderFolderRow(item.folder, open));
+      if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, true));
+    }
+    return rows;
+  };
+
   const renderMainView = () => (
     <s-page heading="Template to File" inlineSize="large">
       <s-stack slot="header-actions" direction="inline" gap="base" justifyContent="space-between">
@@ -3815,7 +3851,7 @@ function Extension() {
             <s-box padding="base">
               <s-spinner accessibilityLabel="Loading templates" />
             </s-box>
-          ) : templateGroups.list.length === 0 && templateGroups.folderBlocks.length === 0 ? (
+          ) : templateGroups.items.length === 0 ? (
             <s-box padding="base">
               <s-text color="subdued">
                 {templates.length === 0
@@ -3833,60 +3869,7 @@ function Extension() {
                 <s-table-header listSlot="inline">Actions</s-table-header>
               </s-table-header-row>
               <s-table-body>
-                {templateGroups.folderBlocks.map((block) => {
-                  const open = expandedFolderIds.includes(block.folder.id);
-                  const toggleId = rowDomId('folder-toggle', block.folder.id);
-                  return [
-                    <s-table-row key={`folder-${block.folder.id}`} clickDelegate={toggleId}>
-                      <s-table-cell>
-                        <s-clickable id={toggleId} onClick={() => toggleFolderOpen(block.folder.id)}>
-                          <s-text type="strong">
-                            {open ? '▾ ' : '▸ '}
-                            {block.folder.name}
-                          </s-text>
-                        </s-clickable>
-                      </s-table-cell>
-                      <s-table-cell>
-                        <s-button
-                          icon="menu-horizontal"
-                          accessibilityLabel={`Actions for folder ${block.folder.name}`}
-                          commandFor={`folder-menu-${block.folder.id}`}
-                        />
-                        <s-menu id={`folder-menu-${block.folder.id}`} accessibilityLabel="Folder actions">
-                          <s-button
-                            disabled={selectedTemplateIds.length === 0}
-                            onClick={() => addSelectedToFolder(block.folder.id)}
-                          >
-                            Add selected to folder
-                          </s-button>
-                          <s-button
-                            disabled={selectedTemplateIds.length === 0}
-                            onClick={() => removeSelectedFromFolder(block.folder.id)}
-                          >
-                            Remove selected from folder
-                          </s-button>
-                          <s-button
-                            commandFor="folder-name-modal"
-                            command="--show"
-                            onClick={() => openRenameFolder(block.folder)}
-                          >
-                            Rename folder
-                          </s-button>
-                          <s-button
-                            tone="critical"
-                            commandFor="delete-folder-modal"
-                            command="--show"
-                            onClick={() => setPendingDeleteFolderId(block.folder.id)}
-                          >
-                            Delete folder
-                          </s-button>
-                        </s-menu>
-                      </s-table-cell>
-                    </s-table-row>,
-                    ...(open ? block.list.map((tpl) => renderTemplateRow(tpl, true)) : []),
-                  ];
-                })}
-                {templateGroups.list.map((tpl) => renderTemplateRow(tpl, false))}
+                {renderTemplateRows()}
               </s-table-body>
             </s-table>
           )}

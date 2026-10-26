@@ -182,10 +182,11 @@ describe('template folders, move and copy', () => {
     expect(src).toContain('<s-modal id="folder-name-modal"');
   });
   it('a folder shows its bold name with a triple-dots menu (rename, delete) and expands its templates on click, indented', () => {
-    expect(src).toContain("rowDomId('folder-toggle', block.folder.id)");
+    expect(src).toContain("rowDomId('folder-toggle', folder.id)");
     expect(src).toContain('Rename folder');
     expect(src).toContain('Delete folder');
-    expect(src).toContain("...(open ? block.list.map((tpl) => renderTemplateRow(tpl, true)) : [])");
+    expect(src).toContain('if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, true));');
+    expect(src).toContain('{renderTemplateRows()}');
     expect(src).toContain("paddingInlineStart={indented ? 'large' : 'none'}");
   });
   it('the template menu has Move (a folder checklist; unchecking returns it to the main list) and Copy template', () => {
@@ -213,11 +214,18 @@ describe('searched variant highlight', () => {
 
 describe('folder menu: add/remove selected templates', () => {
   it('has both buttons wired to the selected templates', () => {
-    expect(src).toContain('onClick={() => addSelectedToFolder(block.folder.id)}');
-    expect(src).toContain('onClick={() => removeSelectedFromFolder(block.folder.id)}');
+    expect(src).toContain('onClick={() => addSelectedToFolder(folder.id)}');
+    expect(src).toContain('onClick={() => removeSelectedFromFolder(folder.id)}');
     const add = between('const addSelectedToFolder', 'const removeSelectedFromFolder');
     expect(add).toContain('picked.has(t.id) && t.folderId !== folderId ? { ...t, folderId } : t');
     const remove = between('const removeSelectedFromFolder', '// A new template with');
     expect(remove).toContain('!picked.has(t.id) || t.folderId !== folderId');
+  });
+});
+
+describe('folder pinning and icon', () => {
+  it('a folder can be pinned from its menu and shows a large folder icon', () => {
+    expect(src).toContain('onClick={() => toggleFolderPin(folder)}');
+    expect(src).toContain("<s-heading>{open ? '📂' : '📁'}</s-heading>");
   });
 });

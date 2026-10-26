@@ -118,7 +118,12 @@ function parseFolders(rawValue: any): TemplateFolder[] {
     const list: TemplateFolder[] = [];
     for (const item of parsed) {
       if (item && typeof item.name === 'string') {
-        list.push({ id: typeof item.id === 'string' && item.id ? item.id : generateFolderId(), name: item.name });
+        list.push({
+          id: typeof item.id === 'string' && item.id ? item.id : generateFolderId(),
+          name: item.name,
+          pinned: item.pinned === true,
+          pinnedAt: typeof item.pinnedAt === 'number' && Number.isFinite(item.pinnedAt) ? item.pinnedAt : null,
+        });
       }
     }
     return list;

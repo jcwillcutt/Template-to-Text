@@ -72,6 +72,9 @@ export type FileBreak = 'selection' | 'object' | 'product' | 'note' | 'variant';
 export interface TemplateFolder {
   id: string;
   name: string;
+  // A pinned folder sorts among the pinned templates (by when it was pinned, newest first) instead of below them.
+  pinned?: boolean;
+  pinnedAt?: number | null;
 }
 
 export interface TemplateData {
