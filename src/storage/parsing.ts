@@ -219,6 +219,7 @@ function mapStoredTemplate(entry: any): TemplateData {
         : null,
     fileBreak,
     mergeCondition: typeof entry?.mergeCondition === 'string' ? entry.mergeCondition : '',
+    ...(typeof entry?.folderId === 'string' && entry.folderId ? { folderId: entry.folderId } : {}),
   };
 }
 
@@ -237,6 +238,8 @@ function serializeTemplateEntry(t: TemplateData): string {
     pinnedAt: t.pinned === true ? (t.pinnedAt ?? null) : null,
     fileBreak: t.fileBreak,
     mergeCondition: t.mergeCondition,
+    // Only written for a template that is in a folder, so every other template's stored JSON is unchanged.
+    ...(t.folderId ? { folderId: t.folderId } : {}),
   });
 }
 

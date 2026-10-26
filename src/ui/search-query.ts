@@ -244,6 +244,35 @@ export function matchesSearchQuery(product: ProductData, raw: string): boolean {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Which variant was searched for: a variant whose SKU or barcode equals (case-insensitively) a term of the search.
+function collectExactValues(node: SearchNode, out: string[]): void {
+  if (node.t === 'not') return;
+  if ('parts' in node) {
+    for (const part of node.parts) collectExactValues(part, out);
+    return;
+  }
+  if (node.t !== 'term') return;
+  if (node.field === null || node.field === 'sku' || node.field === 'barcode') {
+    const v = node.value.trim().toLowerCase();
+    if (v !== '') out.push(v);
+  }
+}
+
+export function exactSearchValues(raw: string): string[] {
+  const node = parseSearchQuery(raw);
+  const out: string[] = [];
+  if (node) collectExactValues(node, out);
+  return out;
+}
+
+export function variantMatchesSearch(variant: { sku: string | null; barcode: string | null }, values: string[]): boolean {
+  if (values.length === 0) return false;
+  const sku = (variant.sku || '').trim().toLowerCase();
+  const barcode = (variant.barcode || '').trim().toLowerCase();
+  return values.some((v) => (sku !== '' && sku === v) || (barcode !== '' && barcode === v));
+}
+
+// ---------------------------------------------------------------------------------------------
 // Pasting a spreadsheet column (or row) into the search box.
 export const MAX_PASTED_TERMS = 50;
 

@@ -249,3 +249,20 @@ describe('line breaks become OR (pasted column, barcode scanner, Enter)', () => 
     expect(quoteSearchTerm('say "hi"')).toBe('"say hi"');
   });
 });
+
+import { exactSearchValues, variantMatchesSearch } from '../../src/ui/search-query';
+describe('searched variant', () => {
+  const v = { sku: 'ABC-1', barcode: '0123456789' };
+  it('matches a variant whose sku or barcode equals a term exactly (case-insensitive)', () => {
+    expect(variantMatchesSearch(v, exactSearchValues('abc-1'))).toBe(true);
+    expect(variantMatchesSearch(v, exactSearchValues('0123456789'))).toBe(true);
+    expect(variantMatchesSearch(v, exactSearchValues('sku:ABC-1'))).toBe(true);
+    expect(variantMatchesSearch(v, exactSearchValues('zzz OR "ABC-1"'))).toBe(true);
+  });
+  it('does not match partial values, negated terms or empty fields', () => {
+    expect(variantMatchesSearch(v, exactSearchValues('ABC'))).toBe(false);
+    expect(variantMatchesSearch(v, exactSearchValues('-ABC-1'))).toBe(false);
+    expect(variantMatchesSearch({ sku: null, barcode: '' }, exactSearchValues('abc'))).toBe(false);
+    expect(variantMatchesSearch(v, exactSearchValues(''))).toBe(false);
+  });
+});

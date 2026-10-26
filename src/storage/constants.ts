@@ -98,8 +98,34 @@ const TEMPLATES_READ_QUERY = `query ReadTemplates {
         `shard${index}: metafield(namespace: "${TEMPLATE_NAMESPACE}", key: "${key}") { value }`,
     ).join('\n    ')}
     legacy: metafield(namespace: "${LEGACY_NAMESPACE}", key: "${LEGACY_KEY}") { value }
+    folders: metafield(namespace: "${TEMPLATE_NAMESPACE}", key: "template_folders") { value }
   }
 }`;
+
+// Template folders: one small JSON array of { id, name } in its own shop metafield. Which folder a template is in
+// is stored on the template itself (TemplateData.folderId).
+const FOLDERS_KEY = 'template_folders';
+
+function generateFolderId(): string {
+  return `folder-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function parseFolders(rawValue: any): TemplateFolder[] {
+  if (rawValue == null || rawValue === '') return [];
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) return [];
+    const list: TemplateFolder[] = [];
+    for (const item of parsed) {
+      if (item && typeof item.name === 'string') {
+        list.push({ id: typeof item.id === 'string' && item.id ? item.id : generateFolderId(), name: item.name });
+      }
+    }
+    return list;
+  } catch {
+    return [];
+  }
+}
 
 const TEMPLATES_WRITE_MUTATION = `mutation WriteTemplates($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {

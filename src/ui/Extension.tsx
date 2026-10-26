@@ -187,6 +187,14 @@ function Extension() {
   const [templateSort, setTemplateSort] = useState<'new-old' | 'old-new' | 'a-z' | 'z-a'>(
     'new-old',
   );
+  // Template folders (see FOLDERS_KEY): the folder list, which folders are expanded, and the popups' working state.
+  const [templateFolders, setTemplateFolders] = useState<TemplateFolder[]>([]);
+  const [expandedFolderIds, setExpandedFolderIds] = useState<string[]>([]);
+  const [folderModalId, setFolderModalId] = useState<string | null>(null);
+  const [folderNameDraft, setFolderNameDraft] = useState<string>('');
+  const [movingTemplateId, setMovingTemplateId] = useState<string | null>(null);
+  const [pendingDeleteFolderId, setPendingDeleteFolderId] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
   // Selection view: whether the up/down reorder arrows are shown.
   // Settings > Download Settings: how a multi-template download is packaged.
@@ -359,6 +367,7 @@ function Extension() {
     if (typeof shop?.primaryDomain?.host === 'string') {
       setPrimaryDomain(shop.primaryDomain.host);
     }
+    setTemplateFolders(parseFolders(shop?.folders?.value));
     // Parse every shard and merge them in order (shard0 first) to reconstruct the full list.
     const shardValues = SHARD_KEYS.map((_key, index) => shop?.[`shard${index}`]?.value);
     let anyUnparseable = false;
@@ -468,6 +477,41 @@ function Extension() {
       return null;
     }
     return nextList;
+  };
+
+  // Folder list read-mutate-write, same shape as mutateGlobalVars. Returns the written list or null (error already
+  // reported through `setError`).
+  const mutateFolders = async (
+    mutate: (current: TemplateFolder[]) => TemplateFolder[],
+    setError: (msg: string) => void,
+  ): Promise<TemplateFolder[] | null> => {
+    const ownerId = await ensureShopId(setError);
+    if (!ownerId) return null;
+    try {
+      const { data, errors: readErrors } = await shopify.query(GLOBALS_READ_QUERY, {
+        variables: { ns: TEMPLATE_NAMESPACE, key: FOLDERS_KEY },
+      });
+      if (readErrors?.length) {
+        setError(readErrors.map((e: any) => e.message).join(', '));
+        return null;
+      }
+      const next = mutate(parseFolders(data?.shop?.globals?.value));
+      const { data: writeData, errors: writeErrors } = await shopify.query(TEMPLATES_WRITE_MUTATION, {
+        variables: {
+          metafields: [{ ownerId, namespace: TEMPLATE_NAMESPACE, key: FOLDERS_KEY, type: 'json', value: JSON.stringify(next) }],
+        },
+      });
+      const message = formatGraphQLErrors(writeErrors, writeData?.metafieldsSet?.userErrors);
+      if (message) {
+        setError(message);
+        return null;
+      }
+      setTemplateFolders(next);
+      return next;
+    } catch (err: any) {
+      setError(err?.message || 'Failed to save folders.');
+      return null;
+    }
   };
 
   // History's own read-mutate-write flow (session 17), the same shape as mutateTemplateList above:
@@ -1286,6 +1330,8 @@ function Extension() {
     const checkedVariantIds =
       selectedVariantIds[p.id] && selectedVariantIds[p.id].length > 0 ? selectedVariantIds[p.id] : allVariantIds;
     const isSelected = Boolean(selectedProducts[p.id]);
+    // SKUs/barcodes typed or scanned into the search: the variant that matches one exactly is shaded.
+    const searchedValues = exactSearchValues(productSearch);
     const url = adminProductUrl(p.id, primaryDomain);
     const checkboxId = rowDomId('product-select', p.id);
     return (
@@ -1325,15 +1371,21 @@ function Extension() {
                     Variants ({checkedVariantIds.length} of {p.allVariants.length} selected)
                   </s-text>
                   {p.allVariants.map((v: VariantData) => (
-                    <s-checkbox
+                    <s-box
                       key={v.id}
-                      label={`${v.title} · ${formatQty(v.inventoryQuantity)}`}
-                      accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
-                      checked={checkedVariantIds.includes(v.id)}
-                      onChange={() =>
-                        toggleVariantChecked(p.id, allVariantIds, v.id, !checkedVariantIds.includes(v.id))
-                      }
-                    />
+                      padding="small-400"
+                      borderRadius="base"
+                      background={variantMatchesSearch(v, searchedValues) ? 'strong' : 'transparent'}
+                    >
+                      <s-checkbox
+                        label={`${v.title} · ${formatQty(v.inventoryQuantity)}`}
+                        accessibilityLabel={`Include variant ${v.title} of ${p.title}`}
+                        checked={checkedVariantIds.includes(v.id)}
+                        onChange={() =>
+                          toggleVariantChecked(p.id, allVariantIds, v.id, !checkedVariantIds.includes(v.id))
+                        }
+                      />
+                    </s-box>
                   ))}
                 </s-stack>
               ) : null}
@@ -1631,6 +1683,10 @@ function Extension() {
           pinnedAt: existingIndex >= 0 ? (currentList[existingIndex].pinnedAt ?? null) : null,
           fileBreak: editorFileBreak,
           mergeCondition: editorMergeCondition,
+          // Editing a template keeps it in its folder.
+          ...(existingIndex >= 0 && currentList[existingIndex].folderId
+            ? { folderId: currentList[existingIndex].folderId }
+            : {}),
         };
         return existingIndex >= 0
           ? currentList.map((t) => (t.id === savedTemplate.id ? savedTemplate : t))
@@ -1657,6 +1713,100 @@ function Extension() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // --- Template folders and copies ---------------------------------------------------------------
+  const toggleFolderOpen = (folderId: string): void => {
+    setExpandedFolderIds((prev: string[]) =>
+      prev.includes(folderId) ? prev.filter((id: string) => id !== folderId) : [...prev, folderId],
+    );
+  };
+
+  const openAddFolder = (): void => {
+    setFolderModalId(null);
+    setFolderNameDraft('');
+    setFolderError(null);
+  };
+
+  const openRenameFolder = (folder: TemplateFolder): void => {
+    setFolderModalId(folder.id);
+    setFolderNameDraft(folder.name);
+    setFolderError(null);
+  };
+
+  const folderNameTaken = (name: string): boolean =>
+    templateFolders.some(
+      (f: TemplateFolder) => f.id !== folderModalId && f.name.trim().toLowerCase() === name.trim().toLowerCase(),
+    );
+
+  const saveFolderName = async (): Promise<void> => {
+    const name = folderNameDraft.trim();
+    if (name === '' || folderNameTaken(name)) return;
+    setFolderError(null);
+    if (folderModalId) {
+      await mutateFolders(
+        (current) => current.map((f) => (f.id === folderModalId ? { ...f, name } : f)),
+        setFolderError,
+      );
+      return;
+    }
+    const folder: TemplateFolder = { id: generateFolderId(), name };
+    const written = await mutateFolders((current) => [...current, folder], setFolderError);
+    if (written) setExpandedFolderIds((prev: string[]) => [...prev, folder.id]);
+  };
+
+  // Delete a folder; every template in it goes back to the main list.
+  const confirmDeleteFolder = async (): Promise<void> => {
+    const folderId = pendingDeleteFolderId;
+    setPendingDeleteFolderId(null);
+    if (!folderId) return;
+    setFolderError(null);
+    const nextList = await mutateTemplateList(
+      (currentList) =>
+        currentList.map((t) => {
+          if (t.folderId !== folderId) return t;
+          const { folderId: _removed, ...rest } = t;
+          return rest;
+        }),
+      setFolderError,
+    );
+    if (!nextList) return;
+    setTemplates(nextList);
+    await mutateFolders((current) => current.filter((f) => f.id !== folderId), setFolderError);
+  };
+
+  // Put a template in a folder (leaving whichever one it was in), or back in the main list with null.
+  const moveTemplateToFolder = async (templateId: string, folderId: string | null): Promise<void> => {
+    setFolderError(null);
+    const nextList = await mutateTemplateList(
+      (currentList) =>
+        currentList.map((t) => {
+          if (t.id !== templateId) return t;
+          const { folderId: _old, ...rest } = t;
+          return folderId ? { ...rest, folderId } : rest;
+        }),
+      setFolderError,
+    );
+    if (nextList) setTemplates(nextList);
+  };
+
+  // A new template with the same contents and the title plus " Copy", in the same folder and never pinned.
+  const copyTemplate = async (template: TemplateData): Promise<void> => {
+    setFolderError(null);
+    const title = `${template.title} Copy`;
+    const copy: TemplateData = {
+      id: generateTemplateId(title),
+      title,
+      body: template.body,
+      extension: template.extension,
+      pinned: false,
+      pinnedAt: null,
+      fileBreak: template.fileBreak,
+      mergeCondition: template.mergeCondition,
+      ...(template.folderId ? { folderId: template.folderId } : {}),
+    };
+    const nextList = await mutateTemplateList((currentList) => [...currentList, copy], setFolderError);
+    if (nextList) setTemplates(nextList);
   };
 
   // Flip the pinned flag of one template and persist the whole list. The stored list is re-read
@@ -1744,7 +1894,11 @@ function Extension() {
   // --------------------------------------------------------------------------------------------
   // The ordered template list to render, plus the index of the row that the pinned / unpinned
   // separator is drawn immediately above (-1 when no separator should appear).
-  const templateGroups = useMemo<{ list: TemplateData[]; dividerIndex: number }>(() => {
+  const templateGroups = useMemo<{
+    list: TemplateData[];
+    dividerIndex: number;
+    folderBlocks: { folder: TemplateFolder; list: TemplateData[] }[];
+  }>(() => {
     const term = templateSearch.trim().toLowerCase();
     const matched = !term
       ? templates
@@ -1766,24 +1920,33 @@ function Extension() {
       }
       return sorted;
     };
-    // While a search term is active, pinning is ignored so a pinned template behaves exactly like
-    // any other template, and no separator is drawn.
+    // While a search term is active, pinning and folders are ignored: matches are one flat list.
     if (term) {
-      return { list: applySelectedSort(matched), dividerIndex: -1 };
+      return { list: applySelectedSort(matched), dividerIndex: -1, folderBlocks: [] };
     }
     // Pinned templates ALWAYS sort by when they were pinned, most recent first, regardless of the
     // selected sort order. A template pinned before the timestamp was recorded has no `pinnedAt`
-    // and sorts to the bottom of the pinned group.
-    const pinned = matched
-      .filter((t) => t.pinned === true)
-      .sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0));
-    // The selected sort order applies to the unpinned templates only.
-    const unpinned = applySelectedSort(matched.filter((t) => t.pinned !== true));
-    return {
-      list: [...pinned, ...unpinned],
-      dividerIndex: pinned.length > 0 && unpinned.length > 0 ? pinned.length : -1,
+    // and sorts to the bottom of the pinned group. The selected sort order applies to the rest.
+    const pinnedFirst = (list: TemplateData[]): { ordered: TemplateData[]; pinnedCount: number; restCount: number } => {
+      const pinned = list
+        .filter((t) => t.pinned === true)
+        .sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0));
+      const rest = applySelectedSort(list.filter((t) => t.pinned !== true));
+      return { ordered: [...pinned, ...rest], pinnedCount: pinned.length, restCount: rest.length };
     };
-  }, [templates, templateSearch, templateSort]);
+    const folderIds = new Set(templateFolders.map((f) => f.id));
+    // A template pointing at a folder that no longer exists is shown in the main list.
+    const root = pinnedFirst(matched.filter((t) => !t.folderId || !folderIds.has(t.folderId)));
+    const folderBlocks = templateFolders.map((folder) => ({
+      folder,
+      list: pinnedFirst(matched.filter((t) => t.folderId === folder.id)).ordered,
+    }));
+    return {
+      list: root.ordered,
+      dividerIndex: root.pinnedCount > 0 && root.restCount > 0 ? root.pinnedCount : -1,
+      folderBlocks,
+    };
+  }, [templates, templateSearch, templateSort, templateFolders]);
 
   // Always show the union of metafields across ALL currently loaded products, regardless of selection,
   // so every known metafield key is available to insert.
@@ -3265,6 +3428,67 @@ function Extension() {
     </s-page>
   );
 
+  // One template row; templates inside an expanded folder are indented.
+  const renderTemplateRow = (tpl: TemplateData, indented: boolean) => {
+    const isSelected = selectedTemplateIds.includes(tpl.id);
+    const selectId = rowDomId('template-select', tpl.id);
+    return (
+                    <s-table-row key={tpl.id} clickDelegate={selectId}>
+                      <s-table-cell>
+                        <s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>
+                          <s-box paddingInlineStart={indented ? 'large' : 'none'}>
+                            <s-stack direction="inline" gap="small" alignItems="center">
+                              <s-text type={isSelected ? 'strong' : undefined}>
+                                {isSelected ? '✓ ' : ''}
+                                {tpl.title || 'Untitled'}
+                              </s-text>
+                              <s-text color="subdued">.{sanitizeExtension(tpl.extension)}</s-text>
+                            </s-stack>
+                          </s-box>
+                        </s-clickable>
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-button
+                          icon="menu-horizontal"
+                          variant={tpl.pinned ? 'primary' : undefined}
+                          loading={pinningId === tpl.id}
+                          accessibilityLabel={`Actions for ${tpl.title}${tpl.pinned ? ' (pinned)' : ''}`}
+                          commandFor={`tpl-menu-${tpl.id}`}
+                        />
+                        <s-menu id={`tpl-menu-${tpl.id}`} accessibilityLabel="Template actions">
+                          <s-button icon="edit" onClick={() => openEditTemplate(tpl)}>
+                            Edit template
+                          </s-button>
+                          <s-button icon="duplicate" onClick={() => copyTemplate(tpl)}>
+                            Copy template
+                          </s-button>
+                          <s-button
+                            commandFor="move-template-modal"
+                            command="--show"
+                            onClick={() => setMovingTemplateId(tpl.id)}
+                          >
+                            Move
+                          </s-button>
+                          <s-button
+                            icon={tpl.pinned ? 'pin-remove' : 'pin'}
+                            onClick={() => togglePin(tpl)}
+                          >
+                            {tpl.pinned ? 'Unpin template' : 'Pin template'}
+                          </s-button>
+                          <s-button
+                            icon="delete"
+                            tone="critical"
+                            commandFor="delete-template-modal"
+                            onClick={() => openDeleteModal(tpl.id)}
+                          >
+                            Delete template
+                          </s-button>
+                        </s-menu>
+                      </s-table-cell>
+                    </s-table-row>
+    );
+  };
+
   const renderMainView = () => (
     <s-page heading="Template to File" inlineSize="large">
       <s-stack slot="header-actions" direction="inline" gap="base" justifyContent="space-between">
@@ -3468,9 +3692,15 @@ function Extension() {
                   <s-text color="subdued">{storageLabel}</s-text>
                 </s-stack>
                 <s-stack direction="inline" gap="small" alignItems="center">
-                  <s-button icon="plus" accessibilityLabel="Add template" onClick={openNewTemplate}>
+                  <s-button icon="plus" accessibilityLabel="Add a template or folder" commandFor="template-add-menu">
                     Add
                   </s-button>
+                  <s-menu id="template-add-menu" accessibilityLabel="Add">
+                    <s-button onClick={openNewTemplate}>Add template</s-button>
+                    <s-button commandFor="folder-name-modal" command="--show" onClick={openAddFolder}>
+                      Add folder
+                    </s-button>
+                  </s-menu>
                   <s-button
                     icon="sort"
                     accessibilityLabel="Sort templates"
@@ -3524,6 +3754,14 @@ function Extension() {
             </s-box>
           ) : null}
 
+          {folderError ? (
+            <s-box padding="base">
+              <s-banner tone="critical" heading="Could not update templates" dismissible onDismiss={() => setFolderError(null)}>
+                <s-text>{folderError}</s-text>
+              </s-banner>
+            </s-box>
+          ) : null}
+
           {pinError ? (
             <s-box padding="base">
               <s-banner tone="critical" heading="Could not update pinned template">
@@ -3547,7 +3785,7 @@ function Extension() {
             <s-box padding="base">
               <s-spinner accessibilityLabel="Loading templates" />
             </s-box>
-          ) : templateGroups.list.length === 0 ? (
+          ) : templateGroups.list.length === 0 && templateGroups.folderBlocks.length === 0 ? (
             <s-box padding="base">
               <s-text color="subdued">
                 {templates.length === 0
@@ -3565,58 +3803,130 @@ function Extension() {
                 <s-table-header listSlot="inline">Actions</s-table-header>
               </s-table-header-row>
               <s-table-body>
-                {templateGroups.list.map((tpl) => {
-                  const isSelected = selectedTemplateIds.includes(tpl.id);
-                  const selectId = rowDomId('template-select', tpl.id);
-                  return (
-                    <s-table-row key={tpl.id} clickDelegate={selectId}>
+                {templateGroups.folderBlocks.map((block) => {
+                  const open = expandedFolderIds.includes(block.folder.id);
+                  const toggleId = rowDomId('folder-toggle', block.folder.id);
+                  return [
+                    <s-table-row key={`folder-${block.folder.id}`} clickDelegate={toggleId}>
                       <s-table-cell>
-                        <s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>
-                          <s-stack direction="inline" gap="small" alignItems="center">
-                            <s-text type={isSelected ? 'strong' : undefined}>
-                              {isSelected ? '✓ ' : ''}
-                              {tpl.title || 'Untitled'}
-                            </s-text>
-                            <s-text color="subdued">.{sanitizeExtension(tpl.extension)}</s-text>
-                          </s-stack>
+                        <s-clickable id={toggleId} onClick={() => toggleFolderOpen(block.folder.id)}>
+                          <s-text type="strong">
+                            {open ? '▾ ' : '▸ '}
+                            {block.folder.name}
+                          </s-text>
                         </s-clickable>
                       </s-table-cell>
                       <s-table-cell>
                         <s-button
                           icon="menu-horizontal"
-                          variant={tpl.pinned ? 'primary' : undefined}
-                          loading={pinningId === tpl.id}
-                          accessibilityLabel={`Actions for ${tpl.title}${tpl.pinned ? ' (pinned)' : ''}`}
-                          commandFor={`tpl-menu-${tpl.id}`}
+                          accessibilityLabel={`Actions for folder ${block.folder.name}`}
+                          commandFor={`folder-menu-${block.folder.id}`}
                         />
-                        <s-menu id={`tpl-menu-${tpl.id}`} accessibilityLabel="Template actions">
-                          <s-button icon="edit" onClick={() => openEditTemplate(tpl)}>
-                            Edit template
-                          </s-button>
+                        <s-menu id={`folder-menu-${block.folder.id}`} accessibilityLabel="Folder actions">
                           <s-button
-                            icon={tpl.pinned ? 'pin-remove' : 'pin'}
-                            onClick={() => togglePin(tpl)}
+                            commandFor="folder-name-modal"
+                            command="--show"
+                            onClick={() => openRenameFolder(block.folder)}
                           >
-                            {tpl.pinned ? 'Unpin template' : 'Pin template'}
+                            Rename folder
                           </s-button>
                           <s-button
-                            icon="delete"
                             tone="critical"
-                            commandFor="delete-template-modal"
-                            onClick={() => openDeleteModal(tpl.id)}
+                            commandFor="delete-folder-modal"
+                            command="--show"
+                            onClick={() => setPendingDeleteFolderId(block.folder.id)}
                           >
-                            Delete template
+                            Delete folder
                           </s-button>
                         </s-menu>
                       </s-table-cell>
-                    </s-table-row>
-                  );
+                    </s-table-row>,
+                    ...(open ? block.list.map((tpl) => renderTemplateRow(tpl, true)) : []),
+                  ];
                 })}
+                {templateGroups.list.map((tpl) => renderTemplateRow(tpl, false))}
               </s-table-body>
             </s-table>
           )}
         </s-section>
       </s-grid>
+
+      <s-modal id="folder-name-modal" heading={folderModalId ? 'Rename folder' : 'New folder'}>
+        <s-stack gap="small">
+          <s-text-field
+            label="Folder name"
+            value={folderNameDraft}
+            error={
+              folderNameDraft.trim() !== '' && folderNameTaken(folderNameDraft)
+                ? 'A folder with that name already exists'
+                : undefined
+            }
+            onInput={(e: any) => setFolderNameDraft(e.currentTarget.value)}
+          />
+        </s-stack>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          disabled={folderNameDraft.trim() === '' || folderNameTaken(folderNameDraft)}
+          commandFor="folder-name-modal"
+          command="--hide"
+          onClick={saveFolderName}
+        >
+          {folderModalId ? 'Rename' : 'Create'}
+        </s-button>
+        <s-button slot="secondary-actions" variant="secondary" commandFor="folder-name-modal" command="--hide">
+          Cancel
+        </s-button>
+      </s-modal>
+
+      <s-modal id="move-template-modal" heading="Move template">
+        <s-stack gap="small">
+          <s-text color="subdued">
+            {movingTemplateId
+              ? `Choose the folder for "${templates.find((t) => t.id === movingTemplateId)?.title || ''}". Unchecking it returns it to the main list.`
+              : ''}
+          </s-text>
+          {templateFolders.length === 0 ? (
+            <s-text color="subdued">No folders yet. Use Add &gt; Add folder to create one.</s-text>
+          ) : (
+            templateFolders.map((folder: TemplateFolder) => {
+              const inFolder = templates.find((t) => t.id === movingTemplateId)?.folderId === folder.id;
+              return (
+                <s-checkbox
+                  key={folder.id}
+                  label={folder.name}
+                  checked={inFolder}
+                  onChange={() => {
+                    if (movingTemplateId) moveTemplateToFolder(movingTemplateId, inFolder ? null : folder.id);
+                  }}
+                />
+              );
+            })
+          )}
+        </s-stack>
+        <s-button slot="primary-action" variant="primary" commandFor="move-template-modal" command="--hide">
+          Done
+        </s-button>
+      </s-modal>
+
+      <s-modal id="delete-folder-modal" heading="Delete folder?">
+        <s-text>
+          {`Delete "${templateFolders.find((f) => f.id === pendingDeleteFolderId)?.name || ''}"? Its templates move back to the main list; none are deleted.`}
+        </s-text>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          tone="critical"
+          commandFor="delete-folder-modal"
+          command="--hide"
+          onClick={confirmDeleteFolder}
+        >
+          Delete folder
+        </s-button>
+        <s-button slot="secondary-actions" variant="secondary" commandFor="delete-folder-modal" command="--hide">
+          Cancel
+        </s-button>
+      </s-modal>
 
       <s-modal id="note-modal" heading="New note">
         <s-stack gap="small">

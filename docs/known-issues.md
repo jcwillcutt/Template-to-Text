@@ -156,3 +156,10 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   `tests/engine/multi-template.test.ts`. The choice is kept for the session only. The Selection view lost its remove-X
   buttons, "Clear Selection" became "Clear Selected", checkboxes/Select All appear on the Current Selection too, and a
   Reorder button (black when on) shows/hides the arrows.
+
+* **Template folders, Copy template, searched-variant shading (unverified in a live admin):** Add is a menu (template or
+  folder); folders live in the `template_to_text.template_folders` metafield and a template's folder is stored on the
+  template (`folderId`, written only when set). A folder's triple dots rename or delete it (its templates return to the
+  main list); a template's triple dots have Move (folder checklist, unchecking returns it to the main list) and Copy
+  template (title + " Copy", same folder, unpinned). While a template search is active the list is flat. In the product
+  list, a variant whose SKU or barcode equals a term of the search is shaded darker.

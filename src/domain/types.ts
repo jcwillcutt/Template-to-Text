@@ -68,6 +68,12 @@ export interface ProductData {
 // longer inferred from the body at all -- see mapStoredTemplate/TemplateData.fileBreak below.
 export type FileBreak = 'selection' | 'object' | 'product' | 'note' | 'variant';
 
+// A named folder in the template list. Stored in its own shop metafield (see FOLDERS_KEY).
+export interface TemplateFolder {
+  id: string;
+  name: string;
+}
+
 export interface TemplateData {
   id: string;
   title: string;
@@ -88,6 +94,8 @@ export interface TemplateData {
   // planOutputFiles, which returns a zero-file plan with a clear, actionable error for a null
   // fileBreak rather than guessing one).
   fileBreak: FileBreak | null;
+  // The template folder this template lives in (a TemplateFolder id); absent/null = the main list.
+  folderId?: string | null;
   // Session 9. A boolean condition (same grammar as an `{{ #if=... }}` condition) evaluated between
   // each pair of ADJACENT output units -- variant/product/note/object rows for the four per-unit
   // fileBreak modes, or the first selection-scope foreach block's iterated items for 'selection'

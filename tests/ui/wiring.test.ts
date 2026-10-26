@@ -75,7 +75,7 @@ describe('product list', () => {
 });
 
 describe('template list', () => {
-  const list = between('templateGroups.list.map((tpl) => {', '</s-menu>');
+  const list = between('const renderTemplateRow', 'const renderMainView');
   it('every row delegates to the clickable holding its name, and that clickable handles the click', () => {
     expect(list).toContain('<s-table-row key={tpl.id} clickDelegate={selectId}>');
     expect(list).toContain('<s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>');
@@ -170,5 +170,43 @@ describe('product title links', () => {
   it('open the product through an in-admin shopify:// link without a new browser tab, and do not toggle the row', () => {
     expect(src).not.toContain('target="_blank"');
     expect(src.match(/onClick=\{\(e: any\) => e\.stopPropagation\(\)\}/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('template folders, move and copy', () => {
+  const storage = fs.readFileSync(path.resolve(import.meta.dirname, '..', '..', 'src', 'storage', 'parsing.ts'), 'utf8');
+  it('Add opens a menu offering a template or a folder; a folder asks for its name in a popup', () => {
+    expect(src).toContain('commandFor="template-add-menu"');
+    expect(src).toContain('Add template');
+    expect(src).toContain('Add folder');
+    expect(src).toContain('<s-modal id="folder-name-modal"');
+  });
+  it('a folder shows its bold name with a triple-dots menu (rename, delete) and expands its templates on click, indented', () => {
+    expect(src).toContain("rowDomId('folder-toggle', block.folder.id)");
+    expect(src).toContain('Rename folder');
+    expect(src).toContain('Delete folder');
+    expect(src).toContain("...(open ? block.list.map((tpl) => renderTemplateRow(tpl, true)) : [])");
+    expect(src).toContain("paddingInlineStart={indented ? 'large' : 'none'}");
+  });
+  it('the template menu has Move (a folder checklist; unchecking returns it to the main list) and Copy template', () => {
+    expect(src).toContain('commandFor="move-template-modal"');
+    expect(src).toContain('moveTemplateToFolder(movingTemplateId, inFolder ? null : folder.id)');
+    expect(src).toContain('Copy template');
+    expect(src).toContain('const title = `${template.title} Copy`;');
+    expect(src).toMatch(/\.\.\.\(template\.folderId \? \{ folderId: template\.folderId \} : \{\}\)/);
+  });
+  it('deleting a folder moves its templates to the main list; editing a template keeps its folder', () => {
+    expect(src).toContain('const { folderId: _removed, ...rest } = t;');
+    expect(src).toContain('// Editing a template keeps it in its folder.');
+  });
+  it('the folder is stored on the template only when set', () => {
+    expect(storage).toContain('...(t.folderId ? { folderId: t.folderId } : {})');
+  });
+});
+
+describe('searched variant highlight', () => {
+  it('shades the variant whose sku or barcode equals the search', () => {
+    expect(src).toContain('variantMatchesSearch(v, searchedValues)');
+    expect(src).toContain("'strong' : 'transparent'");
   });
 });
