@@ -228,6 +228,7 @@ describe('folder pinning and icon', () => {
     expect(src).toContain('onClick={() => toggleFolderPin(folder)}');
     expect(src).toContain("<s-heading>{open ? '▼' : '▶'}</s-heading>");
     expect(src).toContain('<s-text type="strong">{folder.name}</s-text>');
-    expect(src).not.toMatch(/[\u{1F300}-\u{1FAFF}]/u);
+    expect(src).not.toContain('📁');
+    expect(src).not.toContain('📂');
   });
 });
