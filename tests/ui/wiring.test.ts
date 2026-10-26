@@ -227,7 +227,7 @@ describe('folder pinning and icon', () => {
   it('a folder can be pinned from its menu and shows a large bold arrow beside a bold name', () => {
     expect(src).toContain('onClick={() => toggleFolderPin(folder)}');
     expect(src).toContain("<s-heading>{open ? '▼' : '▶'}</s-heading>");
-    expect(src).toContain('<s-text type="strong">{folder.name}</s-text>');
+    expect(src).toContain('<s-heading>{folder.name}</s-heading>');
     expect(src).not.toContain('📁');
     expect(src).not.toContain('📂');
   });

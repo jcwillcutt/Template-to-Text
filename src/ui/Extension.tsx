@@ -3489,7 +3489,7 @@ function Extension() {
                         <s-clickable id={toggleId} onClick={() => toggleFolderOpen(folder.id)}>
                           <s-stack direction="inline" gap="small" alignItems="center">
                             <s-heading>{open ? '▼' : '▶'}</s-heading>
-                            <s-text type="strong">{folder.name}</s-text>
+                            <s-heading>{folder.name}</s-heading>
                           </s-stack>
                         </s-clickable>
                       </s-table-cell>
