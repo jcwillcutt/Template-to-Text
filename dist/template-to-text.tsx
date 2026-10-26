@@ -5549,6 +5549,32 @@ function Extension() {
     );
     if (nextList) setTemplates(nextList);
   };
+  const addSelectedToFolder = async (folderId: string): Promise<void> => {
+    setFolderError(null);
+    const picked = new Set(selectedTemplateIds);
+    const nextList = await mutateTemplateList(
+      (currentList) =>
+        currentList.map((t) => (picked.has(t.id) && t.folderId !== folderId ? { ...t, folderId } : t)),
+      setFolderError,
+    );
+    if (!nextList) return;
+    setTemplates(nextList);
+    setExpandedFolderIds((prev: string[]) => (prev.includes(folderId) ? prev : [...prev, folderId]));
+  };
+  const removeSelectedFromFolder = async (folderId: string): Promise<void> => {
+    setFolderError(null);
+    const picked = new Set(selectedTemplateIds);
+    const nextList = await mutateTemplateList(
+      (currentList) =>
+        currentList.map((t) => {
+          if (!picked.has(t.id) || t.folderId !== folderId) return t;
+          const { folderId: _removed, ...rest } = t;
+          return rest;
+        }),
+      setFolderError,
+    );
+    if (nextList) setTemplates(nextList);
+  };
   const copyTemplate = async (template: TemplateData): Promise<void> => {
     setFolderError(null);
     const title = `${template.title} Copy`;
@@ -7280,6 +7306,18 @@ function Extension() {
                           commandFor={`folder-menu-${block.folder.id}`}
                         />
                         <s-menu id={`folder-menu-${block.folder.id}`} accessibilityLabel="Folder actions">
+                          <s-button
+                            disabled={selectedTemplateIds.length === 0}
+                            onClick={() => addSelectedToFolder(block.folder.id)}
+                          >
+                            Add selected to folder
+                          </s-button>
+                          <s-button
+                            disabled={selectedTemplateIds.length === 0}
+                            onClick={() => removeSelectedFromFolder(block.folder.id)}
+                          >
+                            Remove selected from folder
+                          </s-button>
                           <s-button
                             commandFor="folder-name-modal"
                             command="--show"

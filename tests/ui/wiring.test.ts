@@ -210,3 +210,14 @@ describe('searched variant highlight', () => {
     expect(src).toContain("'strong' : 'transparent'");
   });
 });
+
+describe('folder menu: add/remove selected templates', () => {
+  it('has both buttons wired to the selected templates', () => {
+    expect(src).toContain('onClick={() => addSelectedToFolder(block.folder.id)}');
+    expect(src).toContain('onClick={() => removeSelectedFromFolder(block.folder.id)}');
+    const add = between('const addSelectedToFolder', 'const removeSelectedFromFolder');
+    expect(add).toContain('picked.has(t.id) && t.folderId !== folderId ? { ...t, folderId } : t');
+    const remove = between('const removeSelectedFromFolder', '// A new template with');
+    expect(remove).toContain('!picked.has(t.id) || t.folderId !== folderId');
+  });
+});

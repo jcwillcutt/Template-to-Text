@@ -1790,6 +1790,36 @@ function Extension() {
     if (nextList) setTemplates(nextList);
   };
 
+  // Folder menu: move every SELECTED template that is not in this folder into it (taking it out of any other
+  // folder), or take every SELECTED template that is in this folder out of it. Other templates are untouched.
+  const addSelectedToFolder = async (folderId: string): Promise<void> => {
+    setFolderError(null);
+    const picked = new Set(selectedTemplateIds);
+    const nextList = await mutateTemplateList(
+      (currentList) =>
+        currentList.map((t) => (picked.has(t.id) && t.folderId !== folderId ? { ...t, folderId } : t)),
+      setFolderError,
+    );
+    if (!nextList) return;
+    setTemplates(nextList);
+    setExpandedFolderIds((prev: string[]) => (prev.includes(folderId) ? prev : [...prev, folderId]));
+  };
+
+  const removeSelectedFromFolder = async (folderId: string): Promise<void> => {
+    setFolderError(null);
+    const picked = new Set(selectedTemplateIds);
+    const nextList = await mutateTemplateList(
+      (currentList) =>
+        currentList.map((t) => {
+          if (!picked.has(t.id) || t.folderId !== folderId) return t;
+          const { folderId: _removed, ...rest } = t;
+          return rest;
+        }),
+      setFolderError,
+    );
+    if (nextList) setTemplates(nextList);
+  };
+
   // A new template with the same contents and the title plus " Copy", in the same folder and never pinned.
   const copyTemplate = async (template: TemplateData): Promise<void> => {
     setFolderError(null);
@@ -3823,6 +3853,18 @@ function Extension() {
                           commandFor={`folder-menu-${block.folder.id}`}
                         />
                         <s-menu id={`folder-menu-${block.folder.id}`} accessibilityLabel="Folder actions">
+                          <s-button
+                            disabled={selectedTemplateIds.length === 0}
+                            onClick={() => addSelectedToFolder(block.folder.id)}
+                          >
+                            Add selected to folder
+                          </s-button>
+                          <s-button
+                            disabled={selectedTemplateIds.length === 0}
+                            onClick={() => removeSelectedFromFolder(block.folder.id)}
+                          >
+                            Remove selected from folder
+                          </s-button>
                           <s-button
                             commandFor="folder-name-modal"
                             command="--show"
