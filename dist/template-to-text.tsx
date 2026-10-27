@@ -4978,6 +4978,11 @@ function Extension() {
   const runSearch = (): void => {
     applySearchNow(productSearch);
   };
+  const clearSearch = (): void => {
+    setSearchNotice(null);
+    setProductSearch('');
+    applySearchNow('');
+  };
   const handleSearchInput = (raw: string): void => {
     if (hasColumnSeparators(raw)) {
       const converted = columnToOrQuery(raw);
@@ -7223,6 +7228,9 @@ function Extension() {
         <s-stack direction="inline" gap="base">
           <s-button onClick={clearProductSelection}>Clear Product Selection</s-button>
           <s-button onClick={clearTemplateSelection}>Clear Template Selection</s-button>
+          <s-button onClick={clearSearch} disabled={productSearch === '' && appliedSearch === ''}>
+            Clear Search
+          </s-button>
           <s-button loading={refreshing} disabled={refreshing} onClick={refreshAll}>
             Refresh Page
           </s-button>

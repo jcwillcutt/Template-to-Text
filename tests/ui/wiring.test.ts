@@ -248,3 +248,14 @@ describe('Manage button, selected summary and remembered page', () => {
     expect(src).toContain('setViewStateLoaded(true)');
   });
 });
+
+describe('Clear Search button', () => {
+  it('sits between Clear Template Selection and Refresh Page and empties the search', () => {
+    const header = between('<s-button onClick={clearTemplateSelection}>', 'Refresh Page');
+    expect(header.indexOf('Clear Template Selection')).toBeLessThan(header.indexOf('Clear Search'));
+    expect(header.indexOf('Clear Search')).toBeLessThan(header.indexOf('<s-button loading={refreshing}'));
+    const fn = between('const clearSearch = (): void => {', 'const handleSearchInput');
+    expect(fn).toContain("setProductSearch('')");
+    expect(fn).toContain("applySearchNow('')");
+  });
+});

@@ -918,6 +918,13 @@ function Extension() {
     applySearchNow(productSearch);
   };
 
+  // Empty the product search box and show the unfiltered product list again.
+  const clearSearch = (): void => {
+    setSearchNotice(null);
+    setProductSearch('');
+    applySearchNow('');
+  };
+
   // The search box is a multi-line field so a pasted spreadsheet column keeps its line breaks. A paste with line
   // breaks (or a scanner's Enter) is rewritten to `a OR b OR c` -- exactly what typing the OR statement by hand
   // would give -- and searched immediately. There is deliberately NO search on blur: the first click on a product
@@ -3648,6 +3655,9 @@ function Extension() {
         <s-stack direction="inline" gap="base">
           <s-button onClick={clearProductSelection}>Clear Product Selection</s-button>
           <s-button onClick={clearTemplateSelection}>Clear Template Selection</s-button>
+          <s-button onClick={clearSearch} disabled={productSearch === '' && appliedSearch === ''}>
+            Clear Search
+          </s-button>
           <s-button loading={refreshing} disabled={refreshing} onClick={refreshAll}>
             Refresh Page
           </s-button>
