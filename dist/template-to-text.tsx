@@ -623,6 +623,9 @@ function globalVarBodyPreview(body: string): string {
 function formatSelectionCount(variantCount: number, noteCount: number): string {
   return noteCount === 0 ? `(${variantCount})` : `(${variantCount}/${noteCount})`;
 }
+function formatSelectedSummary(variantCount: number, noteCount: number, templateCount: number): string {
+  return `(${noteCount === 0 ? variantCount : `${variantCount}/${noteCount}`}|${templateCount})`;
+}
 function adminProductUrl(productId: string, _primaryDomain?: string): string | null {
   const match = /\/Product\/(\d+)$/.exec(productId);
   if (!match) return null;
@@ -3675,6 +3678,69 @@ function orderTemplateList(
     ...asTemplates(applySelectedSort(rootTemplates.filter((t) => t.pinned !== true))),
   ];
 }
+interface ViewState {
+  v: 1;
+  search: string;
+  productIds: string[];
+  variantIds: Record<string, string[]>;
+  notes: Record<string, string>;
+  noteObjects: SelectionEntry[];
+  order: Record<string, number>;
+  templateIds: string[];
+  expandedFolderIds: string[];
+}
+const VIEW_STATE_KEY = 'view_state';
+const strings = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
+const record = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+function parseViewState(raw: unknown): ViewState | null {
+  const data = record(raw);
+  if (data.v !== 1) return null;
+  const variantIds: Record<string, string[]> = {};
+  for (const [id, ids] of Object.entries(record(data.variantIds))) variantIds[id] = strings(ids);
+  const notes: Record<string, string> = {};
+  for (const [id, text] of Object.entries(record(data.notes))) if (typeof text === 'string') notes[id] = text;
+  const order: Record<string, number> = {};
+  for (const [id, n] of Object.entries(record(data.order))) if (typeof n === 'number' && Number.isFinite(n)) order[id] = n;
+  const noteObjects: SelectionEntry[] = [];
+  if (Array.isArray(data.noteObjects)) {
+    for (const entry of data.noteObjects) {
+      const e = record(entry);
+      if (typeof e.id === 'string' && typeof e.note === 'string') noteObjects.push({ id: e.id, note: e.note });
+    }
+  }
+  return {
+    v: 1,
+    search: typeof data.search === 'string' ? data.search : '',
+    productIds: strings(data.productIds),
+    variantIds,
+    notes,
+    noteObjects,
+    order,
+    templateIds: strings(data.templateIds),
+    expandedFolderIds: strings(data.expandedFolderIds),
+  };
+}
+function buildViewState(input: Omit<ViewState, 'v'>): ViewState {
+  const keep = new Set(input.productIds);
+  const pick = <T,>(map: Record<string, T>): Record<string, T> => {
+    const out: Record<string, T> = {};
+    for (const id of Object.keys(map)) if (keep.has(id)) out[id] = map[id];
+    return out;
+  };
+  return {
+    v: 1,
+    search: input.search,
+    productIds: input.productIds,
+    variantIds: pick(input.variantIds),
+    notes: pick(input.notes),
+    noteObjects: input.noteObjects,
+    order: input.order,
+    templateIds: input.templateIds,
+    expandedFolderIds: input.expandedFolderIds,
+  };
+}
 const ITALIC_UPPER_BASE = 0x1d434;
 const ITALIC_LOWER_BASE = 0x1d44e;
 const ITALIC_SMALL_H = 0x210e;
@@ -4820,14 +4886,86 @@ function Extension() {
       return null;
     }
   };
+  const [viewStateLoaded, setViewStateLoaded] = useState<boolean>(false);
   useEffect(() => {
     const init = async (): Promise<void> => {
+      let saved: ViewState | null = null;
+      try {
+        saved = parseViewState(await shopify.storage.get(VIEW_STATE_KEY));
+      } catch {
+        saved = null;
+      }
+      const startSearch = saved ? saved.search : '';
+      const startQuery = searchQueryForShopify(startSearch);
+      if (saved) {
+        setProductSearch(startSearch);
+        setAppliedSearch(startQuery);
+        setSelectedTemplateIds(saved.templateIds);
+        setExpandedFolderIds(saved.expandedFolderIds);
+      }
       await fetchTemplates();
-      await fetchProducts(null, 'forward', '');
+      await fetchProducts(null, 'forward', startQuery);
+      if (saved && saved.productIds.length > 0) {
+        try {
+          const { products: restored } = await loadProductsByIds(saved.productIds, true);
+          const byId: Record<string, ProductData> = {};
+          for (const p of restored) byId[p.id] = p;
+          const kept = saved.productIds.filter((id) => byId[id]);
+          const picked: Record<string, ProductData> = {};
+          for (const id of kept) picked[id] = byId[id];
+          setSelectedProducts(picked);
+          const variants: Record<string, string[]> = {};
+          const notes: Record<string, string> = {};
+          for (const id of kept) {
+            if (saved.variantIds[id] && saved.variantIds[id].length > 0) variants[id] = saved.variantIds[id];
+            if (saved.notes[id]) notes[id] = saved.notes[id];
+          }
+          setSelectedVariantIds(variants);
+          setProductNotes(notes);
+        } catch {
+        }
+      }
+      if (saved) {
+        setNoteObjects(saved.noteObjects);
+        setCurrentSelectionOrderIndex(saved.order);
+        currentSelectionOrderCounter.current = Math.max(0, ...Object.values(saved.order));
+      }
+      setViewStateLoaded(true);
       await loadSelections();
     };
     init();
   }, []);
+  useEffect(() => {
+    if (!viewStateLoaded) return;
+    const timer = setTimeout(() => {
+      const state = buildViewState({
+        search: productSearch,
+        productIds: Object.keys(selectedProducts),
+        variantIds: selectedVariantIds,
+        notes: productNotes,
+        noteObjects,
+        order: currentSelectionOrderIndex,
+        templateIds: selectedTemplateIds,
+        expandedFolderIds,
+      });
+      try {
+        const written = shopify.storage.set(VIEW_STATE_KEY, state);
+        if (written && typeof written.catch === 'function') written.catch(() => undefined);
+      } catch {
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [
+    viewStateLoaded,
+    productSearch,
+    selectedProducts,
+    selectedVariantIds,
+    productNotes,
+    noteObjects,
+    currentSelectionOrderIndex,
+    selectedTemplateIds,
+    expandedFolderIds,
+  ]);
   const applySearchNow = (text: string): void => {
     if (searchTimerRef.current !== null) {
       clearTimeout(searchTimerRef.current);
@@ -6982,11 +7120,12 @@ function Extension() {
                             Copy template
                           </s-button>
                           <s-button
+                            icon="folder"
                             commandFor="move-template-modal"
                             command="--show"
                             onClick={() => setMovingTemplateId(tpl.id)}
                           >
-                            Move
+                            Manage
                           </s-button>
                           <s-button
                             icon={tpl.pinned ? 'pin-remove' : 'pin'}
@@ -7143,7 +7282,7 @@ function Extension() {
                 <s-heading>Products</s-heading>
                 <s-stack direction="inline" gap="small" alignItems="center">
                   <s-text color="subdued">
-                    {formatSelectionCount(currentSelectionVariantCount, noteObjects.length)}{' '}
+                    {formatSelectedSummary(currentSelectionVariantCount, noteObjects.length, selectedTemplates.length)}{' '}
                     selected
                   </s-text>
                   <s-button icon="caret-down" commandFor="selections-menu">
@@ -7413,7 +7552,7 @@ function Extension() {
         </s-button>
       </s-modal>
 
-      <s-modal id="move-template-modal" heading="Move template">
+      <s-modal id="move-template-modal" heading="Manage template">
         <s-stack gap="small">
           <s-text color="subdued">
             {movingTemplateId

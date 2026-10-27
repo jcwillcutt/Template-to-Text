@@ -814,14 +814,93 @@ function Extension() {
     }
   };
 
+  // Remember the main page across a reload (clicking through to a product and back unloads the extension). The
+  // saved view -- search text, selected products (variants, notes), selected templates, open folders -- is read
+  // from the extension's own storage on start and written (after a short pause) whenever any of it changes.
+  const [viewStateLoaded, setViewStateLoaded] = useState<boolean>(false);
+
   useEffect(() => {
     const init = async (): Promise<void> => {
+      let saved: ViewState | null = null;
+      try {
+        saved = parseViewState(await shopify.storage.get(VIEW_STATE_KEY));
+      } catch {
+        saved = null;
+      }
+      const startSearch = saved ? saved.search : '';
+      const startQuery = searchQueryForShopify(startSearch);
+      if (saved) {
+        setProductSearch(startSearch);
+        setAppliedSearch(startQuery);
+        setSelectedTemplateIds(saved.templateIds);
+        setExpandedFolderIds(saved.expandedFolderIds);
+      }
       await fetchTemplates();
-      await fetchProducts(null, 'forward', '');
+      await fetchProducts(null, 'forward', startQuery);
+      if (saved && saved.productIds.length > 0) {
+        try {
+          const { products: restored } = await loadProductsByIds(saved.productIds, true);
+          const byId: Record<string, ProductData> = {};
+          for (const p of restored) byId[p.id] = p;
+          const kept = saved.productIds.filter((id) => byId[id]);
+          const picked: Record<string, ProductData> = {};
+          for (const id of kept) picked[id] = byId[id];
+          setSelectedProducts(picked);
+          const variants: Record<string, string[]> = {};
+          const notes: Record<string, string> = {};
+          for (const id of kept) {
+            if (saved.variantIds[id] && saved.variantIds[id].length > 0) variants[id] = saved.variantIds[id];
+            if (saved.notes[id]) notes[id] = saved.notes[id];
+          }
+          setSelectedVariantIds(variants);
+          setProductNotes(notes);
+        } catch {
+          // The saved products could not be re-read; start with an empty selection.
+        }
+      }
+      if (saved) {
+        setNoteObjects(saved.noteObjects);
+        setCurrentSelectionOrderIndex(saved.order);
+        currentSelectionOrderCounter.current = Math.max(0, ...Object.values(saved.order));
+      }
+      setViewStateLoaded(true);
       await loadSelections();
     };
     init();
   }, []);
+
+  useEffect(() => {
+    if (!viewStateLoaded) return;
+    const timer = setTimeout(() => {
+      const state = buildViewState({
+        search: productSearch,
+        productIds: Object.keys(selectedProducts),
+        variantIds: selectedVariantIds,
+        notes: productNotes,
+        noteObjects,
+        order: currentSelectionOrderIndex,
+        templateIds: selectedTemplateIds,
+        expandedFolderIds,
+      });
+      try {
+        const written = shopify.storage.set(VIEW_STATE_KEY, state);
+        if (written && typeof written.catch === 'function') written.catch(() => undefined);
+      } catch {
+        // Storage unavailable or full: the page simply isn't remembered.
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [
+    viewStateLoaded,
+    productSearch,
+    selectedProducts,
+    selectedVariantIds,
+    productNotes,
+    noteObjects,
+    currentSelectionOrderIndex,
+    selectedTemplateIds,
+    expandedFolderIds,
+  ]);
 
   // Run a search right now (cancelling any pending typed search).
   const applySearchNow = (text: string): void => {
@@ -3455,11 +3534,12 @@ function Extension() {
                             Copy template
                           </s-button>
                           <s-button
+                            icon="folder"
                             commandFor="move-template-modal"
                             command="--show"
                             onClick={() => setMovingTemplateId(tpl.id)}
                           >
-                            Move
+                            Manage
                           </s-button>
                           <s-button
                             icon={tpl.pinned ? 'pin-remove' : 'pin'}
@@ -3627,7 +3707,7 @@ function Extension() {
                 <s-heading>Products</s-heading>
                 <s-stack direction="inline" gap="small" alignItems="center">
                   <s-text color="subdued">
-                    {formatSelectionCount(currentSelectionVariantCount, noteObjects.length)}{' '}
+                    {formatSelectedSummary(currentSelectionVariantCount, noteObjects.length, selectedTemplates.length)}{' '}
                     selected
                   </s-text>
                   <s-button icon="caret-down" commandFor="selections-menu">
@@ -3904,7 +3984,7 @@ function Extension() {
         </s-button>
       </s-modal>
 
-      <s-modal id="move-template-modal" heading="Move template">
+      <s-modal id="move-template-modal" heading="Manage template">
         <s-stack gap="small">
           <s-text color="subdued">
             {movingTemplateId

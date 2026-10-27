@@ -232,3 +232,19 @@ describe('folder pinning and icon', () => {
     expect(src).not.toContain('📂');
   });
 });
+
+describe('Manage button, selected summary and remembered page', () => {
+  it('the template menu item is Manage, with an icon and no emoji', () => {
+    expect(src).toMatch(/icon="folder"\s+commandFor="move-template-modal"[\s\S]{0,200}Manage\s*<\/s-button>/);
+  });
+  it('the products header shows (variants|templates) selected', () => {
+    expect(src).toContain('formatSelectedSummary(currentSelectionVariantCount, noteObjects.length, selectedTemplates.length)');
+  });
+  it('the main page is restored from, and saved to, extension storage', () => {
+    expect(src).toContain('shopify.storage.get(VIEW_STATE_KEY)');
+    expect(src).toContain('shopify.storage.set(VIEW_STATE_KEY, state)');
+    expect(src).toContain('loadProductsByIds(saved.productIds, true)');
+    expect(src).toContain('fetchProducts(null, \'forward\', startQuery)');
+    expect(src).toContain('setViewStateLoaded(true)');
+  });
+});

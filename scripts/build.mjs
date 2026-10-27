@@ -40,6 +40,7 @@ export const ORDER = [
   'src/ui/search-query.ts',
   'src/ui/search.ts',
   'src/ui/template-list.ts',
+  'src/ui/view-state.ts',
   'src/ui/format.tsx',
   'src/ui/graphql.ts',
   'src/ui/syntax-guide.tsx',

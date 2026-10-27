@@ -163,3 +163,10 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   main list); a template's triple dots have Move (folder checklist, unchecking returns it to the main list) and Copy
   template (title + " Copy", same folder, unpinned). While a template search is active the list is flat. In the product
   list, a variant whose SKU or barcode equals a term of the search is shaded darker.
+
+* **Remembered page, Manage, selected summary (unverified in a live admin):** the main page's search text, selected
+  products (variant picks, notes), free-standing notes, selected templates and open folders are saved to
+  `shopify.storage` (the extension's own browser storage, 400 ms after each change) and restored on start, so clicking
+  through to a product and back keeps them (`src/ui/view-state.ts`). An extension cannot edit the admin page's URL, so
+  the URL-parameter approach was not used. A template's menu item "Move" is now "Manage" (folder icon), and the
+  Products header reads "(variants|templates) selected".

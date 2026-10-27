@@ -22,6 +22,12 @@ export function formatSelectionCount(variantCount: number, noteCount: number): s
   return noteCount === 0 ? `(${variantCount})` : `(${variantCount}/${noteCount})`;
 }
 
+// The main page's "selected" label: "(v|m)" -- v selected variants and m selected templates. Free-standing notes, when
+// there are any, follow the variants as "(v/n|m)".
+export function formatSelectedSummary(variantCount: number, noteCount: number, templateCount: number): string {
+  return `(${noteCount === 0 ? variantCount : `${variantCount}/${noteCount}`}|${templateCount})`;
+}
+
 // Builds a link to a product's Shopify Admin edit page from its GraphQL gid
 // ("gid://shopify/Product/123...") and the shop's primary domain host (the same value exposed as
 // {{ primaryDomain }}), for the product-selection table's "click the title to open the product
