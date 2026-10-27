@@ -1770,8 +1770,8 @@ function Extension() {
           fileBreak: editorFileBreak,
           mergeCondition: editorMergeCondition,
           // Editing a template keeps it in its folder.
-          ...(existingIndex >= 0 && currentList[existingIndex].folderId
-            ? { folderId: currentList[existingIndex].folderId }
+          ...(existingIndex >= 0 && currentList[existingIndex].folderIds
+            ? { folderIds: currentList[existingIndex].folderIds }
             : {}),
         };
         return existingIndex >= 0
@@ -1848,12 +1848,7 @@ function Extension() {
     if (!folderId) return;
     setFolderError(null);
     const nextList = await mutateTemplateList(
-      (currentList) =>
-        currentList.map((t) => {
-          if (t.folderId !== folderId) return t;
-          const { folderId: _removed, ...rest } = t;
-          return rest;
-        }),
+      (currentList) => currentList.map((t) => withoutFolder(t, folderId)),
       setFolderError,
     );
     if (!nextList) return;
@@ -1861,16 +1856,12 @@ function Extension() {
     await mutateFolders((current) => current.filter((f) => f.id !== folderId), setFolderError);
   };
 
-  // Put a template in a folder (leaving whichever one it was in), or back in the main list with null.
-  const moveTemplateToFolder = async (templateId: string, folderId: string | null): Promise<void> => {
+  // Add a template to a folder, or take it out of that folder (it can be in several; with none it is in the main list).
+  const setTemplateInFolder = async (templateId: string, folderId: string, inFolder: boolean): Promise<void> => {
     setFolderError(null);
     const nextList = await mutateTemplateList(
       (currentList) =>
-        currentList.map((t) => {
-          if (t.id !== templateId) return t;
-          const { folderId: _old, ...rest } = t;
-          return folderId ? { ...rest, folderId } : rest;
-        }),
+        currentList.map((t) => (t.id !== templateId ? t : inFolder ? withFolder(t, folderId) : withoutFolder(t, folderId))),
       setFolderError,
     );
     if (nextList) setTemplates(nextList);
@@ -1888,14 +1879,13 @@ function Extension() {
     );
   };
 
-  // Folder menu: move every SELECTED template that is not in this folder into it (taking it out of any other
-  // folder), or take every SELECTED template that is in this folder out of it. Other templates are untouched.
+  // Folder menu: put every SELECTED template in this folder (it stays in any other folders too), or take every SELECTED
+  // template out of this folder. Other templates are untouched.
   const addSelectedToFolder = async (folderId: string): Promise<void> => {
     setFolderError(null);
     const picked = new Set(selectedTemplateIds);
     const nextList = await mutateTemplateList(
-      (currentList) =>
-        currentList.map((t) => (picked.has(t.id) && t.folderId !== folderId ? { ...t, folderId } : t)),
+      (currentList) => currentList.map((t) => (picked.has(t.id) ? withFolder(t, folderId) : t)),
       setFolderError,
     );
     if (!nextList) return;
@@ -1907,18 +1897,13 @@ function Extension() {
     setFolderError(null);
     const picked = new Set(selectedTemplateIds);
     const nextList = await mutateTemplateList(
-      (currentList) =>
-        currentList.map((t) => {
-          if (!picked.has(t.id) || t.folderId !== folderId) return t;
-          const { folderId: _removed, ...rest } = t;
-          return rest;
-        }),
+      (currentList) => currentList.map((t) => (picked.has(t.id) ? withoutFolder(t, folderId) : t)),
       setFolderError,
     );
     if (nextList) setTemplates(nextList);
   };
 
-  // A new template with the same contents and the title plus " Copy", in the same folder and never pinned.
+  // A new template with the same contents and the title plus " Copy", in the same folders and never pinned.
   const copyTemplate = async (template: TemplateData): Promise<void> => {
     setFolderError(null);
     const title = `${template.title} Copy`;
@@ -1931,7 +1916,7 @@ function Extension() {
       pinnedAt: null,
       fileBreak: template.fileBreak,
       mergeCondition: template.mergeCondition,
-      ...(template.folderId ? { folderId: template.folderId } : {}),
+      ...(template.folderIds && template.folderIds.length > 0 ? { folderIds: [...template.folderIds] } : {}),
     };
     const nextList = await mutateTemplateList((currentList) => [...currentList, copy], setFolderError);
     if (nextList) setTemplates(nextList);
@@ -3507,14 +3492,31 @@ function Extension() {
   );
 
   // One template row; templates inside an expanded folder are indented.
-  const renderTemplateRow = (tpl: TemplateData, indented: boolean) => {
+  // A vertical line down the left of each level of folder nesting, so templates grouped in a folder read as a unit.
+  const withFolderLines = (depth: number, content: any) => {
+    let wrapped = content;
+    for (let level = 0; level < depth; level++) {
+      wrapped = (
+        <s-box borderWidth="none none none base" borderStyle="solid" borderColor="strong" paddingInlineStart="base">
+          {wrapped}
+        </s-box>
+      );
+    }
+    return wrapped;
+  };
+
+  // One template row. `depth` is how many folders deep it is shown (0 = main list) and `scope` the folder it is listed
+  // under (a template in several folders appears once under each, so ids and keys must differ per appearance).
+  const renderTemplateRow = (tpl: TemplateData, depth: number, scope: string) => {
     const isSelected = selectedTemplateIds.includes(tpl.id);
-    const selectId = rowDomId('template-select', tpl.id);
+    const selectId = rowDomId(`template-select-${scope}`, tpl.id);
+    const menuId = `tpl-menu-${rowDomId(scope, tpl.id)}`;
     return (
-                    <s-table-row key={tpl.id} clickDelegate={selectId}>
+                    <s-table-row key={`${scope}-${tpl.id}`} clickDelegate={selectId}>
                       <s-table-cell>
-                        <s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>
-                          <s-box paddingInlineStart={indented ? 'large' : 'none'}>
+                        {withFolderLines(
+                          depth,
+                          <s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>
                             <s-stack direction="inline" gap="small" alignItems="center">
                               <s-text type={isSelected ? 'strong' : undefined}>
                                 {isSelected ? '✓ ' : ''}
@@ -3522,8 +3524,8 @@ function Extension() {
                               </s-text>
                               <s-text color="subdued">.{sanitizeExtension(tpl.extension)}</s-text>
                             </s-stack>
-                          </s-box>
-                        </s-clickable>
+                          </s-clickable>,
+                        )}
                       </s-table-cell>
                       <s-table-cell>
                         <s-button
@@ -3531,9 +3533,9 @@ function Extension() {
                           variant={tpl.pinned ? 'primary' : undefined}
                           loading={pinningId === tpl.id}
                           accessibilityLabel={`Actions for ${tpl.title}${tpl.pinned ? ' (pinned)' : ''}`}
-                          commandFor={`tpl-menu-${tpl.id}`}
+                          commandFor={menuId}
                         />
-                        <s-menu id={`tpl-menu-${tpl.id}`} accessibilityLabel="Template actions">
+                        <s-menu id={menuId} accessibilityLabel="Template actions">
                           <s-button icon="edit" onClick={() => openEditTemplate(tpl)}>
                             Edit template
                           </s-button>
@@ -3583,7 +3585,8 @@ function Extension() {
                       <s-table-cell>
                         <s-button
                           icon="menu-horizontal"
-                          accessibilityLabel={`Actions for folder ${folder.name}`}
+                          variant={folder.pinned ? 'primary' : undefined}
+                          accessibilityLabel={`Actions for folder ${folder.name}${folder.pinned ? ' (pinned)' : ''}`}
                           commandFor={`folder-menu-${folder.id}`}
                         />
                         <s-menu id={`folder-menu-${folder.id}`} accessibilityLabel="Folder actions">
@@ -3632,12 +3635,12 @@ function Extension() {
     const rows: any[] = [];
     for (const item of templateGroups.items) {
       if (item.kind === 'template') {
-        rows.push(renderTemplateRow(item.tpl, false));
+        rows.push(renderTemplateRow(item.tpl, 0, 'main'));
         continue;
       }
       const open = expandedFolderIds.includes(item.folder.id);
       rows.push(renderFolderRow(item.folder, open));
-      if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, true));
+      if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, 1, item.folder.id));
     }
     return rows;
   };
@@ -3998,21 +4001,22 @@ function Extension() {
         <s-stack gap="small">
           <s-text color="subdued">
             {movingTemplateId
-              ? `Choose the folder for "${templates.find((t) => t.id === movingTemplateId)?.title || ''}". Unchecking it returns it to the main list.`
+              ? `Choose the folders "${templates.find((t) => t.id === movingTemplateId)?.title || ''}" is in. It can be in several; with none it is in the main list.`
               : ''}
           </s-text>
           {templateFolders.length === 0 ? (
             <s-text color="subdued">No folders yet. Use Add &gt; Add folder to create one.</s-text>
           ) : (
             templateFolders.map((folder: TemplateFolder) => {
-              const inFolder = templates.find((t) => t.id === movingTemplateId)?.folderId === folder.id;
+              const movingTemplate = templates.find((t) => t.id === movingTemplateId);
+              const inFolder = movingTemplate ? isInFolder(movingTemplate, folder.id) : false;
               return (
                 <s-checkbox
                   key={folder.id}
                   label={folder.name}
                   checked={inFolder}
                   onChange={() => {
-                    if (movingTemplateId) moveTemplateToFolder(movingTemplateId, inFolder ? null : folder.id);
+                    if (movingTemplateId) setTemplateInFolder(movingTemplateId, folder.id, !inFolder);
                   }}
                 />
               );

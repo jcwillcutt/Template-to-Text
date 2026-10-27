@@ -97,8 +97,8 @@ export interface TemplateData {
   // planOutputFiles, which returns a zero-file plan with a clear, actionable error for a null
   // fileBreak rather than guessing one).
   fileBreak: FileBreak | null;
-  // The template folder this template lives in (a TemplateFolder id); absent/null = the main list.
-  folderId?: string | null;
+  // The template folders this template is in (TemplateFolder ids); absent or empty = the main list only.
+  folderIds?: string[];
   // Session 9. A boolean condition (same grammar as an `{{ #if=... }}` condition) evaluated between
   // each pair of ADJACENT output units -- variant/product/note/object rows for the four per-unit
   // fileBreak modes, or the first selection-scope foreach block's iterated items for 'selection'

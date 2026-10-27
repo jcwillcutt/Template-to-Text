@@ -103,7 +103,7 @@ const TEMPLATES_READ_QUERY = `query ReadTemplates {
 }`;
 
 // Template folders: one small JSON array of { id, name } in its own shop metafield. Which folder a template is in
-// is stored on the template itself (TemplateData.folderId).
+// is stored on the template itself (TemplateData.folderIds).
 const FOLDERS_KEY = 'template_folders';
 
 function generateFolderId(): string {

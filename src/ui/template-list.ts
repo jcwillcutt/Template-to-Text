@@ -2,6 +2,20 @@
 import type { TemplateData, TemplateFolder } from '../domain/types';
 import { sanitizeExtension } from '../format/helpers';
 
+// Folder membership: a template can be in any number of folders.
+export const isInFolder = (t: TemplateData, folderId: string): boolean => (t.folderIds || []).includes(folderId);
+
+export function withFolder(t: TemplateData, folderId: string): TemplateData {
+  return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId] };
+}
+
+export function withoutFolder(t: TemplateData, folderId: string): TemplateData {
+  if (!isInFolder(t, folderId)) return t;
+  const { folderIds, ...rest } = t;
+  const left = (folderIds || []).filter((id) => id !== folderId);
+  return left.length > 0 ? { ...rest, folderIds: left } : rest;
+}
+
 export type TemplateSortMode = 'new-old' | 'old-new' | 'a-z' | 'z-a';
 
 export type TemplateListItem =
@@ -38,10 +52,11 @@ export function orderTemplateList(
   const byPinTime = (a: { pinnedAt?: number | null }, b: { pinnedAt?: number | null }): number =>
     (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0);
   const folderIds = new Set(folders.map((f) => f.id));
-  // A template pointing at a folder that no longer exists is shown in the main list.
-  const rootTemplates = matched.filter((t) => !t.folderId || !folderIds.has(t.folderId));
+  // A template is listed in each of its folders; one with no folder (or only folders that no longer exist) is listed
+  // in the main list.
+  const rootTemplates = matched.filter((t) => !(t.folderIds || []).some((id) => folderIds.has(id)));
   const folderItem = (folder: TemplateFolder): TemplateListItem => {
-    const members = matched.filter((t) => t.folderId === folder.id);
+    const members = matched.filter((t) => isInFolder(t, folder.id));
     const pinned = members.filter((t) => t.pinned === true).sort(byPinTime);
     return { kind: 'folder', folder, list: [...pinned, ...applySelectedSort(members.filter((t) => t.pinned !== true))] };
   };

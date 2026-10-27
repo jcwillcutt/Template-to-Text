@@ -52,7 +52,7 @@ interface TemplateData {
   pinned: boolean;
   pinnedAt: number | null;
   fileBreak: FileBreak | null;
-  folderId?: string | null;
+  folderIds?: string[];
   mergeCondition: string;
 }
 type BulkSelectMode = 'shown' | 'in-stock';
@@ -499,6 +499,14 @@ const FILE_BREAK_LABELS: Record<FileBreak, string> = {
   note: 'Note',
   variant: 'Variant',
 };
+function storedFolderIds(entry: any): { folderIds?: string[] } {
+  const ids: string[] = Array.isArray(entry?.folderIds)
+    ? entry.folderIds.filter((x: any) => typeof x === 'string' && x !== '')
+    : typeof entry?.folderId === 'string' && entry.folderId
+      ? [entry.folderId]
+      : [];
+  return ids.length > 0 ? { folderIds: Array.from(new Set(ids)) } : {};
+}
 function mapStoredTemplate(entry: any): TemplateData {
   const title = typeof entry?.title === 'string' ? entry.title : '';
   const body = typeof entry?.body === 'string' ? entry.body : '';
@@ -519,7 +527,7 @@ function mapStoredTemplate(entry: any): TemplateData {
         : null,
     fileBreak,
     mergeCondition: typeof entry?.mergeCondition === 'string' ? entry.mergeCondition : '',
-    ...(typeof entry?.folderId === 'string' && entry.folderId ? { folderId: entry.folderId } : {}),
+    ...storedFolderIds(entry),
   };
 }
 function serializeTemplateEntry(t: TemplateData): string {
@@ -532,7 +540,7 @@ function serializeTemplateEntry(t: TemplateData): string {
     pinnedAt: t.pinned === true ? (t.pinnedAt ?? null) : null,
     fileBreak: t.fileBreak,
     mergeCondition: t.mergeCondition,
-    ...(t.folderId ? { folderId: t.folderId } : {}),
+    ...(t.folderIds && t.folderIds.length > 0 ? { folderIds: t.folderIds } : {}),
   });
 }
 function serializeTemplates(list: TemplateData[]): string {
@@ -3632,6 +3640,16 @@ function searchQueryForShopify(text: string): string {
 function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
   return matchesSearchQuery(product, rawQuery);
 }
+const isInFolder = (t: TemplateData, folderId: string): boolean => (t.folderIds || []).includes(folderId);
+function withFolder(t: TemplateData, folderId: string): TemplateData {
+  return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId] };
+}
+function withoutFolder(t: TemplateData, folderId: string): TemplateData {
+  if (!isInFolder(t, folderId)) return t;
+  const { folderIds, ...rest } = t;
+  const left = (folderIds || []).filter((id) => id !== folderId);
+  return left.length > 0 ? { ...rest, folderIds: left } : rest;
+}
 type TemplateSortMode = 'new-old' | 'old-new' | 'a-z' | 'z-a';
 type TemplateListItem =
   | { kind: 'template'; tpl: TemplateData }
@@ -3660,9 +3678,9 @@ function orderTemplateList(
   const byPinTime = (a: { pinnedAt?: number | null }, b: { pinnedAt?: number | null }): number =>
     (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0);
   const folderIds = new Set(folders.map((f) => f.id));
-  const rootTemplates = matched.filter((t) => !t.folderId || !folderIds.has(t.folderId));
+  const rootTemplates = matched.filter((t) => !(t.folderIds || []).some((id) => folderIds.has(id)));
   const folderItem = (folder: TemplateFolder): TemplateListItem => {
-    const members = matched.filter((t) => t.folderId === folder.id);
+    const members = matched.filter((t) => isInFolder(t, folder.id));
     const pinned = members.filter((t) => t.pinned === true).sort(byPinTime);
     return { kind: 'folder', folder, list: [...pinned, ...applySelectedSort(members.filter((t) => t.pinned !== true))] };
   };
@@ -5650,8 +5668,8 @@ function Extension() {
           pinnedAt: existingIndex >= 0 ? (currentList[existingIndex].pinnedAt ?? null) : null,
           fileBreak: editorFileBreak,
           mergeCondition: editorMergeCondition,
-          ...(existingIndex >= 0 && currentList[existingIndex].folderId
-            ? { folderId: currentList[existingIndex].folderId }
+          ...(existingIndex >= 0 && currentList[existingIndex].folderIds
+            ? { folderIds: currentList[existingIndex].folderIds }
             : {}),
         };
         return existingIndex >= 0
@@ -5720,27 +5738,18 @@ function Extension() {
     if (!folderId) return;
     setFolderError(null);
     const nextList = await mutateTemplateList(
-      (currentList) =>
-        currentList.map((t) => {
-          if (t.folderId !== folderId) return t;
-          const { folderId: _removed, ...rest } = t;
-          return rest;
-        }),
+      (currentList) => currentList.map((t) => withoutFolder(t, folderId)),
       setFolderError,
     );
     if (!nextList) return;
     setTemplates(nextList);
     await mutateFolders((current) => current.filter((f) => f.id !== folderId), setFolderError);
   };
-  const moveTemplateToFolder = async (templateId: string, folderId: string | null): Promise<void> => {
+  const setTemplateInFolder = async (templateId: string, folderId: string, inFolder: boolean): Promise<void> => {
     setFolderError(null);
     const nextList = await mutateTemplateList(
       (currentList) =>
-        currentList.map((t) => {
-          if (t.id !== templateId) return t;
-          const { folderId: _old, ...rest } = t;
-          return folderId ? { ...rest, folderId } : rest;
-        }),
+        currentList.map((t) => (t.id !== templateId ? t : inFolder ? withFolder(t, folderId) : withoutFolder(t, folderId))),
       setFolderError,
     );
     if (nextList) setTemplates(nextList);
@@ -5760,8 +5769,7 @@ function Extension() {
     setFolderError(null);
     const picked = new Set(selectedTemplateIds);
     const nextList = await mutateTemplateList(
-      (currentList) =>
-        currentList.map((t) => (picked.has(t.id) && t.folderId !== folderId ? { ...t, folderId } : t)),
+      (currentList) => currentList.map((t) => (picked.has(t.id) ? withFolder(t, folderId) : t)),
       setFolderError,
     );
     if (!nextList) return;
@@ -5772,12 +5780,7 @@ function Extension() {
     setFolderError(null);
     const picked = new Set(selectedTemplateIds);
     const nextList = await mutateTemplateList(
-      (currentList) =>
-        currentList.map((t) => {
-          if (!picked.has(t.id) || t.folderId !== folderId) return t;
-          const { folderId: _removed, ...rest } = t;
-          return rest;
-        }),
+      (currentList) => currentList.map((t) => (picked.has(t.id) ? withoutFolder(t, folderId) : t)),
       setFolderError,
     );
     if (nextList) setTemplates(nextList);
@@ -5794,7 +5797,7 @@ function Extension() {
       pinnedAt: null,
       fileBreak: template.fileBreak,
       mergeCondition: template.mergeCondition,
-      ...(template.folderId ? { folderId: template.folderId } : {}),
+      ...(template.folderIds && template.folderIds.length > 0 ? { folderIds: [...template.folderIds] } : {}),
     };
     const nextList = await mutateTemplateList((currentList) => [...currentList, copy], setFolderError);
     if (nextList) setTemplates(nextList);
@@ -7091,14 +7094,27 @@ function Extension() {
       </s-modal>
     </s-page>
   );
-  const renderTemplateRow = (tpl: TemplateData, indented: boolean) => {
+  const withFolderLines = (depth: number, content: any) => {
+    let wrapped = content;
+    for (let level = 0; level < depth; level++) {
+      wrapped = (
+        <s-box borderWidth="none none none base" borderStyle="solid" borderColor="strong" paddingInlineStart="base">
+          {wrapped}
+        </s-box>
+      );
+    }
+    return wrapped;
+  };
+  const renderTemplateRow = (tpl: TemplateData, depth: number, scope: string) => {
     const isSelected = selectedTemplateIds.includes(tpl.id);
-    const selectId = rowDomId('template-select', tpl.id);
+    const selectId = rowDomId(`template-select-${scope}`, tpl.id);
+    const menuId = `tpl-menu-${rowDomId(scope, tpl.id)}`;
     return (
-                    <s-table-row key={tpl.id} clickDelegate={selectId}>
+                    <s-table-row key={`${scope}-${tpl.id}`} clickDelegate={selectId}>
                       <s-table-cell>
-                        <s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>
-                          <s-box paddingInlineStart={indented ? 'large' : 'none'}>
+                        {withFolderLines(
+                          depth,
+                          <s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>
                             <s-stack direction="inline" gap="small" alignItems="center">
                               <s-text type={isSelected ? 'strong' : undefined}>
                                 {isSelected ? '✓ ' : ''}
@@ -7106,8 +7122,8 @@ function Extension() {
                               </s-text>
                               <s-text color="subdued">.{sanitizeExtension(tpl.extension)}</s-text>
                             </s-stack>
-                          </s-box>
-                        </s-clickable>
+                          </s-clickable>,
+                        )}
                       </s-table-cell>
                       <s-table-cell>
                         <s-button
@@ -7115,9 +7131,9 @@ function Extension() {
                           variant={tpl.pinned ? 'primary' : undefined}
                           loading={pinningId === tpl.id}
                           accessibilityLabel={`Actions for ${tpl.title}${tpl.pinned ? ' (pinned)' : ''}`}
-                          commandFor={`tpl-menu-${tpl.id}`}
+                          commandFor={menuId}
                         />
-                        <s-menu id={`tpl-menu-${tpl.id}`} accessibilityLabel="Template actions">
+                        <s-menu id={menuId} accessibilityLabel="Template actions">
                           <s-button icon="edit" onClick={() => openEditTemplate(tpl)}>
                             Edit template
                           </s-button>
@@ -7166,7 +7182,8 @@ function Extension() {
                       <s-table-cell>
                         <s-button
                           icon="menu-horizontal"
-                          accessibilityLabel={`Actions for folder ${folder.name}`}
+                          variant={folder.pinned ? 'primary' : undefined}
+                          accessibilityLabel={`Actions for folder ${folder.name}${folder.pinned ? ' (pinned)' : ''}`}
                           commandFor={`folder-menu-${folder.id}`}
                         />
                         <s-menu id={`folder-menu-${folder.id}`} accessibilityLabel="Folder actions">
@@ -7212,12 +7229,12 @@ function Extension() {
     const rows: any[] = [];
     for (const item of templateGroups.items) {
       if (item.kind === 'template') {
-        rows.push(renderTemplateRow(item.tpl, false));
+        rows.push(renderTemplateRow(item.tpl, 0, 'main'));
         continue;
       }
       const open = expandedFolderIds.includes(item.folder.id);
       rows.push(renderFolderRow(item.folder, open));
-      if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, true));
+      if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, 1, item.folder.id));
     }
     return rows;
   };
@@ -7564,21 +7581,22 @@ function Extension() {
         <s-stack gap="small">
           <s-text color="subdued">
             {movingTemplateId
-              ? `Choose the folder for "${templates.find((t) => t.id === movingTemplateId)?.title || ''}". Unchecking it returns it to the main list.`
+              ? `Choose the folders "${templates.find((t) => t.id === movingTemplateId)?.title || ''}" is in. It can be in several; with none it is in the main list.`
               : ''}
           </s-text>
           {templateFolders.length === 0 ? (
             <s-text color="subdued">No folders yet. Use Add &gt; Add folder to create one.</s-text>
           ) : (
             templateFolders.map((folder: TemplateFolder) => {
-              const inFolder = templates.find((t) => t.id === movingTemplateId)?.folderId === folder.id;
+              const movingTemplate = templates.find((t) => t.id === movingTemplateId);
+              const inFolder = movingTemplate ? isInFolder(movingTemplate, folder.id) : false;
               return (
                 <s-checkbox
                   key={folder.id}
                   label={folder.name}
                   checked={inFolder}
                   onChange={() => {
-                    if (movingTemplateId) moveTemplateToFolder(movingTemplateId, inFolder ? null : folder.id);
+                    if (movingTemplateId) setTemplateInFolder(movingTemplateId, folder.id, !inFolder);
                   }}
                 />
               );

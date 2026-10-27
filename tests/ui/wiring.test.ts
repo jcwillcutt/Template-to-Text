@@ -77,9 +77,9 @@ describe('product list', () => {
 describe('template list', () => {
   const list = between('const renderTemplateRow', 'const renderMainView');
   it('every row delegates to the clickable holding its name, and that clickable handles the click', () => {
-    expect(list).toContain('<s-table-row key={tpl.id} clickDelegate={selectId}>');
+    expect(list).toContain('<s-table-row key={`${scope}-${tpl.id}`} clickDelegate={selectId}>');
     expect(list).toContain('<s-clickable id={selectId} onClick={() => handleTemplateRowClick(tpl)}>');
-    expect(list).toContain("rowDomId('template-select', tpl.id)");
+    expect(list).toContain('rowDomId(`template-select-${scope}`, tpl.id)');
   });
   it('a click selects and a double click opens the editor, via a ref-tracked click record', () => {
     const handler = between('const handleTemplateRowClick', 'const openEditTemplate');
@@ -93,7 +93,7 @@ describe('template list', () => {
     expect(handler).toContain('if (before !== null && click.next === before) return;');
   });
   it('the actions button and menu live in their own cell (secondary actions)', () => {
-    expect(list).toContain('commandFor={`tpl-menu-${tpl.id}`}');
+    expect(list).toContain('commandFor={menuId}');
   });
 });
 
@@ -185,23 +185,25 @@ describe('template folders, move and copy', () => {
     expect(src).toContain("rowDomId('folder-toggle', folder.id)");
     expect(src).toContain('Rename folder');
     expect(src).toContain('Delete folder');
-    expect(src).toContain('if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, true));');
+    expect(src).toContain('if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, 1, item.folder.id));');
     expect(src).toContain('{renderTemplateRows()}');
-    expect(src).toContain("paddingInlineStart={indented ? 'large' : 'none'}");
+    expect(src).toContain('borderWidth="none none none base"');
+    expect(src).toContain('renderTemplateRow(tpl, 1, item.folder.id)');
   });
   it('the template menu has Move (a folder checklist; unchecking returns it to the main list) and Copy template', () => {
     expect(src).toContain('commandFor="move-template-modal"');
-    expect(src).toContain('moveTemplateToFolder(movingTemplateId, inFolder ? null : folder.id)');
+    expect(src).toContain('setTemplateInFolder(movingTemplateId, folder.id, !inFolder)');
     expect(src).toContain('Copy template');
     expect(src).toContain('const title = `${template.title} Copy`;');
-    expect(src).toMatch(/\.\.\.\(template\.folderId \? \{ folderId: template\.folderId \} : \{\}\)/);
+    expect(src).toContain('folderIds: [...template.folderIds]');
   });
   it('deleting a folder moves its templates to the main list; editing a template keeps its folder', () => {
-    expect(src).toContain('const { folderId: _removed, ...rest } = t;');
+    expect(src).toContain('currentList.map((t) => withoutFolder(t, folderId))');
     expect(src).toContain('// Editing a template keeps it in its folder.');
   });
   it('the folder is stored on the template only when set', () => {
-    expect(storage).toContain('...(t.folderId ? { folderId: t.folderId } : {})');
+    expect(storage).toContain('...(t.folderIds && t.folderIds.length > 0 ? { folderIds: t.folderIds } : {})');
+    expect(storage).toContain('...storedFolderIds(entry)');
   });
 });
 
@@ -217,9 +219,9 @@ describe('folder menu: add/remove selected templates', () => {
     expect(src).toContain('onClick={() => addSelectedToFolder(folder.id)}');
     expect(src).toContain('onClick={() => removeSelectedFromFolder(folder.id)}');
     const add = between('const addSelectedToFolder', 'const removeSelectedFromFolder');
-    expect(add).toContain('picked.has(t.id) && t.folderId !== folderId ? { ...t, folderId } : t');
+    expect(add).toContain('picked.has(t.id) ? withFolder(t, folderId) : t');
     const remove = between('const removeSelectedFromFolder', '// A new template with');
-    expect(remove).toContain('!picked.has(t.id) || t.folderId !== folderId');
+    expect(remove).toContain('picked.has(t.id) ? withoutFolder(t, folderId) : t');
   });
 });
 
@@ -257,5 +259,16 @@ describe('Clear Search button', () => {
     const fn = between('const clearSearch = (): void => {', 'const handleSearchInput');
     expect(fn).toContain("setProductSearch('')");
     expect(fn).toContain("applySearchNow('')");
+  });
+});
+
+describe('multi-folder templates and pinned folder menu', () => {
+  it('the folder triple dots are black (primary) when the folder is pinned', () => {
+    expect(src).toContain("variant={folder.pinned ? 'primary' : undefined}");
+  });
+  it('every appearance of a template has its own row id, key and menu id', () => {
+    expect(src).toContain("rowDomId(`template-select-${scope}`, tpl.id)");
+    expect(src).toContain('key={`${scope}-${tpl.id}`}');
+    expect(src).toContain('const menuId = `tpl-menu-${rowDomId(scope, tpl.id)}`;');
   });
 });

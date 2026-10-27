@@ -196,6 +196,16 @@ const FILE_BREAK_LABELS: Record<FileBreak, string> = {
 // actionable error, not a guess) rather than silently defaulting to something that might not match
 // what a merchant actually wants for that specific template.
 
+// The folders a stored template is in: `folderIds`, or the single `folderId` older versions wrote.
+function storedFolderIds(entry: any): { folderIds?: string[] } {
+  const ids: string[] = Array.isArray(entry?.folderIds)
+    ? entry.folderIds.filter((x: any) => typeof x === 'string' && x !== '')
+    : typeof entry?.folderId === 'string' && entry.folderId
+      ? [entry.folderId]
+      : [];
+  return ids.length > 0 ? { folderIds: Array.from(new Set(ids)) } : {};
+}
+
 // Map one raw entry from the stored JSON array into a TemplateData, defaulting missing fields and
 // generating an id when absent. JSON parsing already yields real newline characters, so no extra
 // newline unescaping is needed.
@@ -219,7 +229,7 @@ function mapStoredTemplate(entry: any): TemplateData {
         : null,
     fileBreak,
     mergeCondition: typeof entry?.mergeCondition === 'string' ? entry.mergeCondition : '',
-    ...(typeof entry?.folderId === 'string' && entry.folderId ? { folderId: entry.folderId } : {}),
+    ...storedFolderIds(entry),
   };
 }
 
@@ -239,7 +249,7 @@ function serializeTemplateEntry(t: TemplateData): string {
     fileBreak: t.fileBreak,
     mergeCondition: t.mergeCondition,
     // Only written for a template that is in a folder, so every other template's stored JSON is unchanged.
-    ...(t.folderId ? { folderId: t.folderId } : {}),
+    ...(t.folderIds && t.folderIds.length > 0 ? { folderIds: t.folderIds } : {}),
   });
 }
 

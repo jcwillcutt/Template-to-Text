@@ -170,3 +170,9 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   through to a product and back keeps them (`src/ui/view-state.ts`). An extension cannot edit the admin page's URL, so
   the URL-parameter approach was not used. A template's menu item "Move" is now "Manage" (folder icon), and the
   Products header reads "(variants|templates) selected".
+
+* **Multi-folder templates and folder lines:** a template can be in several folders (`folderIds` on the template; the single
+  `folderId` older builds wrote is read as a one-item list) and is listed under each; with no folder it is in the main
+  list. Add selected / Remove selected / Manage only add or remove that folder's membership (nothing is stolen from other
+  folders). Templates in an open folder have a vertical line on the left (one per nesting level, ready for nested folders),
+  and a pinned folder's triple dots are black like a pinned template's.
