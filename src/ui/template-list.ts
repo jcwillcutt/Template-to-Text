@@ -5,19 +5,27 @@ import { sanitizeExtension } from '../format/helpers';
 // Folder membership: a template can be in any number of folders.
 export const isInFolder = (t: TemplateData, folderId: string): boolean => (t.folderIds || []).includes(folderId);
 
-// Whether a template is in the main list: in none of the folders that exist.
+// Whether a template is listed on the main page. One in no (existing) folder always is; one in folders is only when it
+// was explicitly put there too.
 export const isInMainList = (t: TemplateData, folders: TemplateFolder[]): boolean =>
-  !folders.some((f) => isInFolder(t, f.id));
+  !folders.some((f) => isInFolder(t, f.id)) || t.onMain === true;
 
+// Adding a template to a folder takes it off the main page unless it was explicitly kept there.
 export function withFolder(t: TemplateData, folderId: string): TemplateData {
-  return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId] };
+  return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId], onMain: t.onMain ?? false };
 }
 
+// Taking it out of its last folder puts it back on the main page.
 export function withoutFolder(t: TemplateData, folderId: string): TemplateData {
   if (!isInFolder(t, folderId)) return t;
-  const { folderIds, ...rest } = t;
+  const { folderIds, onMain: _onMain, ...rest } = t;
   const left = (folderIds || []).filter((id) => id !== folderId);
-  return left.length > 0 ? { ...rest, folderIds: left } : rest;
+  return left.length > 0 ? { ...rest, folderIds: left, ...(typeof t.onMain === 'boolean' ? { onMain: t.onMain } : {}) } : rest;
+}
+
+// Put a template on, or take it off, the main page. (Off only sticks while it is in some folder.)
+export function withMain(t: TemplateData, on: boolean): TemplateData {
+  return { ...t, onMain: on };
 }
 
 export type TemplateSortMode = 'new-old' | 'old-new' | 'a-z' | 'z-a';
@@ -68,18 +76,14 @@ export function orderTemplateList(
       folderItems.push({ kind: 'folder', folder, list });
       for (const t of list) shown.add(t.id);
     }
-    const rest = matched.filter(
-      (t) => !shown.has(t.id) && !(t.folderIds || []).some((id) => folders.some((f) => f.id === id)),
-    );
+    const rest = matched.filter((t) => !shown.has(t.id) && isInMainList(t, folders));
     return [...folderItems, ...asTemplates(applySelectedSort(rest))];
   }
 
   const byPinTime = (a: { pinnedAt?: number | null }, b: { pinnedAt?: number | null }): number =>
     (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0);
-  const folderIds = new Set(folders.map((f) => f.id));
-  // A template is listed in each of its folders; one with no folder (or only folders that no longer exist) is listed
-  // in the main list.
-  const rootTemplates = matched.filter((t) => !(t.folderIds || []).some((id) => folderIds.has(id)));
+  // A template is listed in each of its folders, and on the main page when it is in no folder or was kept there.
+  const rootTemplates = matched.filter((t) => isInMainList(t, folders));
   const folderItem = (folder: TemplateFolder): TemplateListItem => {
     const members = matched.filter((t) => isInFolder(t, folder.id));
     const pinned = members.filter((t) => t.pinned === true).sort(byPinTime);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { orderTemplateList, isInFolder, isInMainList, withFolder, withoutFolder } from '../../src/ui/template-list';
+import { orderTemplateList, isInFolder, isInMainList, withFolder, withoutFolder, withMain } from '../../src/ui/template-list';
 import type { TemplateData, TemplateFolder } from '../../src/domain/types';
 
 const t = (id: string, o: Partial<TemplateData> = {}): TemplateData => ({
@@ -51,6 +51,26 @@ describe('orderTemplateList', () => {
 });
 
 describe('folder membership helpers', () => {
+  it('a template can be on the main page and in folders at once', () => {
+    const fs: TemplateFolder[] = [{ id: 'F1', name: 'F1' }];
+    const both = withMain(withFolder(t('a'), 'F1'), true);
+    expect(isInMainList(both, fs)).toBe(true);
+    expect(isInFolder(both, 'F1')).toBe(true);
+    expect(label(orderTemplateList([both], fs, '', 'old-new'))).toEqual(['[F1:a]', 'a']);
+  });
+  it('adding to a folder takes a main-page template off the main page; removing the last folder puts it back', () => {
+    const fs: TemplateFolder[] = [{ id: 'F1', name: 'F1' }];
+    const inF = withFolder(t('a'), 'F1');
+    expect(isInMainList(inF, fs)).toBe(false);
+    const back = withoutFolder(inF, 'F1');
+    expect(isInMainList(back, fs)).toBe(true);
+    expect('onMain' in back).toBe(false);
+  });
+  it('a template taken off the main page while in a folder is listed only in that folder', () => {
+    const fs: TemplateFolder[] = [{ id: 'F1', name: 'F1' }];
+    const x = withMain(t('a', { folderIds: ['F1'], onMain: true }), false);
+    expect(label(orderTemplateList([x], fs, '', 'old-new'))).toEqual(['[F1:a]']);
+  });
   it('a template is on the main page when it is in none of the existing folders', () => {
     const fs: TemplateFolder[] = [{ id: 'F1', name: 'F1' }];
     expect(isInMainList(t('a'), fs)).toBe(true);

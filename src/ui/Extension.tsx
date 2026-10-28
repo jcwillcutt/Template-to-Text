@@ -1771,7 +1771,10 @@ function Extension() {
           mergeCondition: editorMergeCondition,
           // Editing a template keeps it in its folder.
           ...(existingIndex >= 0 && currentList[existingIndex].folderIds
-            ? { folderIds: currentList[existingIndex].folderIds }
+            ? {
+                folderIds: currentList[existingIndex].folderIds,
+                ...(typeof currentList[existingIndex].onMain === 'boolean' ? { onMain: currentList[existingIndex].onMain } : {}),
+              }
             : {}),
         };
         return existingIndex >= 0
@@ -1878,16 +1881,11 @@ function Extension() {
     if (nextList) setTemplates(nextList);
   };
 
-  // Take a template out of every folder (back to the main page only).
-  const setTemplateMainPage = async (templateId: string): Promise<void> => {
+  // Put a template on, or take it off, the main page (it stays wherever else it is).
+  const setTemplateMain = async (templateId: string, on: boolean): Promise<void> => {
     setFolderError(null);
     const nextList = await mutateTemplateList(
-      (currentList) =>
-        currentList.map((t) => {
-          if (t.id !== templateId) return t;
-          const { folderIds: _gone, ...rest } = t;
-          return rest;
-        }),
+      (currentList) => currentList.map((t) => (t.id === templateId ? withMain(t, on) : t)),
       setFolderError,
     );
     if (nextList) setTemplates(nextList);
@@ -1942,7 +1940,9 @@ function Extension() {
       pinnedAt: null,
       fileBreak: template.fileBreak,
       mergeCondition: template.mergeCondition,
-      ...(template.folderIds && template.folderIds.length > 0 ? { folderIds: [...template.folderIds] } : {}),
+      ...(template.folderIds && template.folderIds.length > 0
+        ? { folderIds: [...template.folderIds], ...(typeof template.onMain === 'boolean' ? { onMain: template.onMain } : {}) }
+        : {}),
     };
     const nextList = await mutateTemplateList((currentList) => [...currentList, copy], setFolderError);
     if (nextList) setTemplates(nextList);
@@ -4052,11 +4052,14 @@ function Extension() {
                 <s-checkbox
                   label="Main page"
                   checked={onMainPage}
+                  disabled={!managed || !templateFolders.some((f) => isInFolder(managed, f.id))}
                   onChange={(e: any) => {
-                    // Ticking it takes the template out of every folder; it can't be unticked by itself (the template
-                    // has to be somewhere), tick a folder instead.
-                    if (!managed || !Boolean(e.currentTarget.checked) || onMainPage) return;
-                    setTemplateMainPage(managed.id);
+                    // The template can also be in folders. It can't be taken off the main page while it is in no folder
+                    // (it has to be somewhere): tick a folder first.
+                    const want = Boolean(e.currentTarget.checked);
+                    if (!managed || want === onMainPage) return;
+                    if (!want && !templateFolders.some((f) => isInFolder(managed, f.id))) return;
+                    setTemplateMain(managed.id, want);
                   }}
                 />
                 {templateFolders.length === 0 ? (

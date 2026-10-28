@@ -53,6 +53,7 @@ interface TemplateData {
   pinnedAt: number | null;
   fileBreak: FileBreak | null;
   folderIds?: string[];
+  onMain?: boolean;
   mergeCondition: string;
 }
 type BulkSelectMode = 'shown' | 'in-stock';
@@ -499,13 +500,14 @@ const FILE_BREAK_LABELS: Record<FileBreak, string> = {
   note: 'Note',
   variant: 'Variant',
 };
-function storedFolderIds(entry: any): { folderIds?: string[] } {
+function storedFolderIds(entry: any): { folderIds?: string[]; onMain?: boolean } {
   const ids: string[] = Array.isArray(entry?.folderIds)
     ? entry.folderIds.filter((x: any) => typeof x === 'string' && x !== '')
     : typeof entry?.folderId === 'string' && entry.folderId
       ? [entry.folderId]
       : [];
-  return ids.length > 0 ? { folderIds: Array.from(new Set(ids)) } : {};
+  if (ids.length === 0) return {};
+  return { folderIds: Array.from(new Set(ids)), ...(typeof entry?.onMain === 'boolean' ? { onMain: entry.onMain } : {}) };
 }
 function mapStoredTemplate(entry: any): TemplateData {
   const title = typeof entry?.title === 'string' ? entry.title : '';
@@ -540,7 +542,9 @@ function serializeTemplateEntry(t: TemplateData): string {
     pinnedAt: t.pinned === true ? (t.pinnedAt ?? null) : null,
     fileBreak: t.fileBreak,
     mergeCondition: t.mergeCondition,
-    ...(t.folderIds && t.folderIds.length > 0 ? { folderIds: t.folderIds } : {}),
+    ...(t.folderIds && t.folderIds.length > 0
+      ? { folderIds: t.folderIds, ...(typeof t.onMain === 'boolean' ? { onMain: t.onMain } : {}) }
+      : {}),
   });
 }
 function serializeTemplates(list: TemplateData[]): string {
@@ -3642,15 +3646,18 @@ function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
 }
 const isInFolder = (t: TemplateData, folderId: string): boolean => (t.folderIds || []).includes(folderId);
 const isInMainList = (t: TemplateData, folders: TemplateFolder[]): boolean =>
-  !folders.some((f) => isInFolder(t, f.id));
+  !folders.some((f) => isInFolder(t, f.id)) || t.onMain === true;
 function withFolder(t: TemplateData, folderId: string): TemplateData {
-  return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId] };
+  return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId], onMain: t.onMain ?? false };
 }
 function withoutFolder(t: TemplateData, folderId: string): TemplateData {
   if (!isInFolder(t, folderId)) return t;
-  const { folderIds, ...rest } = t;
+  const { folderIds, onMain: _onMain, ...rest } = t;
   const left = (folderIds || []).filter((id) => id !== folderId);
-  return left.length > 0 ? { ...rest, folderIds: left } : rest;
+  return left.length > 0 ? { ...rest, folderIds: left, ...(typeof t.onMain === 'boolean' ? { onMain: t.onMain } : {}) } : rest;
+}
+function withMain(t: TemplateData, on: boolean): TemplateData {
+  return { ...t, onMain: on };
 }
 type TemplateSortMode = 'new-old' | 'old-new' | 'a-z' | 'z-a';
 type TemplateListItem =
@@ -3691,15 +3698,12 @@ function orderTemplateList(
       folderItems.push({ kind: 'folder', folder, list });
       for (const t of list) shown.add(t.id);
     }
-    const rest = matched.filter(
-      (t) => !shown.has(t.id) && !(t.folderIds || []).some((id) => folders.some((f) => f.id === id)),
-    );
+    const rest = matched.filter((t) => !shown.has(t.id) && isInMainList(t, folders));
     return [...folderItems, ...asTemplates(applySelectedSort(rest))];
   }
   const byPinTime = (a: { pinnedAt?: number | null }, b: { pinnedAt?: number | null }): number =>
     (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0);
-  const folderIds = new Set(folders.map((f) => f.id));
-  const rootTemplates = matched.filter((t) => !(t.folderIds || []).some((id) => folderIds.has(id)));
+  const rootTemplates = matched.filter((t) => isInMainList(t, folders));
   const folderItem = (folder: TemplateFolder): TemplateListItem => {
     const members = matched.filter((t) => isInFolder(t, folder.id));
     const pinned = members.filter((t) => t.pinned === true).sort(byPinTime);
@@ -5690,7 +5694,10 @@ function Extension() {
           fileBreak: editorFileBreak,
           mergeCondition: editorMergeCondition,
           ...(existingIndex >= 0 && currentList[existingIndex].folderIds
-            ? { folderIds: currentList[existingIndex].folderIds }
+            ? {
+                folderIds: currentList[existingIndex].folderIds,
+                ...(typeof currentList[existingIndex].onMain === 'boolean' ? { onMain: currentList[existingIndex].onMain } : {}),
+              }
             : {}),
         };
         return existingIndex >= 0
@@ -5783,15 +5790,10 @@ function Extension() {
     );
     if (nextList) setTemplates(nextList);
   };
-  const setTemplateMainPage = async (templateId: string): Promise<void> => {
+  const setTemplateMain = async (templateId: string, on: boolean): Promise<void> => {
     setFolderError(null);
     const nextList = await mutateTemplateList(
-      (currentList) =>
-        currentList.map((t) => {
-          if (t.id !== templateId) return t;
-          const { folderIds: _gone, ...rest } = t;
-          return rest;
-        }),
+      (currentList) => currentList.map((t) => (t.id === templateId ? withMain(t, on) : t)),
       setFolderError,
     );
     if (nextList) setTemplates(nextList);
@@ -5839,7 +5841,9 @@ function Extension() {
       pinnedAt: null,
       fileBreak: template.fileBreak,
       mergeCondition: template.mergeCondition,
-      ...(template.folderIds && template.folderIds.length > 0 ? { folderIds: [...template.folderIds] } : {}),
+      ...(template.folderIds && template.folderIds.length > 0
+        ? { folderIds: [...template.folderIds], ...(typeof template.onMain === 'boolean' ? { onMain: template.onMain } : {}) }
+        : {}),
     };
     const nextList = await mutateTemplateList((currentList) => [...currentList, copy], setFolderError);
     if (nextList) setTemplates(nextList);
@@ -7645,9 +7649,12 @@ function Extension() {
                 <s-checkbox
                   label="Main page"
                   checked={onMainPage}
+                  disabled={!managed || !templateFolders.some((f) => isInFolder(managed, f.id))}
                   onChange={(e: any) => {
-                    if (!managed || !Boolean(e.currentTarget.checked) || onMainPage) return;
-                    setTemplateMainPage(managed.id);
+                    const want = Boolean(e.currentTarget.checked);
+                    if (!managed || want === onMainPage) return;
+                    if (!want && !templateFolders.some((f) => isInFolder(managed, f.id))) return;
+                    setTemplateMain(managed.id, want);
                   }}
                 />
                 {templateFolders.length === 0 ? (

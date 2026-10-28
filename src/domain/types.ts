@@ -99,6 +99,8 @@ export interface TemplateData {
   fileBreak: FileBreak | null;
   // The template folders this template is in (TemplateFolder ids); absent or empty = the main list only.
   folderIds?: string[];
+  // Whether it is also listed on the main page while in folders. Absent means "only when it is in no folder".
+  onMain?: boolean;
   // Session 9. A boolean condition (same grammar as an `{{ #if=... }}` condition) evaluated between
   // each pair of ADJACENT output units -- variant/product/note/object rows for the four per-unit
   // fileBreak modes, or the first selection-scope foreach block's iterated items for 'selection'
