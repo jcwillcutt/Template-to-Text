@@ -10,9 +10,12 @@ export const isInFolder = (t: TemplateData, folderId: string): boolean => (t.fol
 export const isInMainList = (t: TemplateData, folders: TemplateFolder[]): boolean =>
   !folders.some((f) => isInFolder(t, f.id)) || t.onMain === true;
 
-// Adding a template to a folder takes it off the main page unless it was explicitly kept there.
+// Adding a template to a folder keeps it wherever it already was: a template on the main page stays there too (take it
+// off with withMain), one that was only in folders stays only in folders.
 export function withFolder(t: TemplateData, folderId: string): TemplateData {
-  return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId], onMain: t.onMain ?? false };
+  if (isInFolder(t, folderId)) return t;
+  const hadFolders = (t.folderIds || []).length > 0;
+  return { ...t, folderIds: [...(t.folderIds || []), folderId], onMain: t.onMain ?? !hadFolders };
 }
 
 // Taking it out of its last folder puts it back on the main page.

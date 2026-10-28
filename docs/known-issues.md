@@ -185,5 +185,5 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   contents appearing at the bottom). A quick double click on a folder opens it once.
 
 * **Main page plus folders:** a template can be on the main page and in folders at once (`onMain`, stored only for a template that is in
-  folders). Adding a template to a folder takes it off the main page unless "Main page" is ticked again in Manage; taking it out of its
+  folders). Adding a template to a folder keeps it on the main page too (untick "Main page" in Manage to move it); taking it out of its
   last folder puts it back; Main page can't be unticked while the template is in no folder.

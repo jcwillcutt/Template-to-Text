@@ -58,11 +58,19 @@ describe('folder membership helpers', () => {
     expect(isInFolder(both, 'F1')).toBe(true);
     expect(label(orderTemplateList([both], fs, '', 'old-new'))).toEqual(['[F1:a]', 'a']);
   });
-  it('adding to a folder takes a main-page template off the main page; removing the last folder puts it back', () => {
-    const fs: TemplateFolder[] = [{ id: 'F1', name: 'F1' }];
+  it('adding to a folder keeps a main-page template on the main page; removing it from the main page is explicit', () => {
+    const fs: TemplateFolder[] = [{ id: 'F1', name: 'F1' }, { id: 'F2', name: 'F2' }];
     const inF = withFolder(t('a'), 'F1');
-    expect(isInMainList(inF, fs)).toBe(false);
-    const back = withoutFolder(inF, 'F1');
+    expect(isInMainList(inF, fs)).toBe(true);
+    expect(isInFolder(inF, 'F1')).toBe(true);
+    expect(isInMainList(withMain(inF, false), fs)).toBe(false);
+    // a template that was only in folders stays only in folders when it joins another
+    const folderOnly = withFolder(withMain(inF, false), 'F2');
+    expect(isInMainList(folderOnly, fs)).toBe(false);
+  });
+  it('taking a template out of its last folder leaves it on the main page', () => {
+    const fs: TemplateFolder[] = [{ id: 'F1', name: 'F1' }];
+    const back = withoutFolder(withMain(withFolder(t('a'), 'F1'), false), 'F1');
     expect(isInMainList(back, fs)).toBe(true);
     expect('onMain' in back).toBe(false);
   });

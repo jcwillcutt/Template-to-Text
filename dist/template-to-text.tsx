@@ -3648,7 +3648,9 @@ const isInFolder = (t: TemplateData, folderId: string): boolean => (t.folderIds 
 const isInMainList = (t: TemplateData, folders: TemplateFolder[]): boolean =>
   !folders.some((f) => isInFolder(t, f.id)) || t.onMain === true;
 function withFolder(t: TemplateData, folderId: string): TemplateData {
-  return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId], onMain: t.onMain ?? false };
+  if (isInFolder(t, folderId)) return t;
+  const hadFolders = (t.folderIds || []).length > 0;
+  return { ...t, folderIds: [...(t.folderIds || []), folderId], onMain: t.onMain ?? !hadFolders };
 }
 function withoutFolder(t: TemplateData, folderId: string): TemplateData {
   if (!isInFolder(t, folderId)) return t;
