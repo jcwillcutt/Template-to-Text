@@ -1802,6 +1802,17 @@ function Extension() {
   };
 
   // --- Template folders and copies ---------------------------------------------------------------
+  // Two quick clicks on a folder open it once, not open-then-close.
+  const lastFolderClickRef = useRef<ClickRecord | null>(null);
+  const handleFolderClick = (folderId: string): void => {
+    const before = lastFolderClickRef.current;
+    const click = registerClick(before, folderId, Date.now());
+    lastFolderClickRef.current = click.next;
+    // The second click of a quick pair, or the same physical click delivered twice, does nothing.
+    if (click.isDouble || (before !== null && click.next === before)) return;
+    toggleFolderOpen(folderId);
+  };
+
   const toggleFolderOpen = (folderId: string): void => {
     setExpandedFolderIds((prev: string[]) =>
       prev.includes(folderId) ? prev.filter((id: string) => id !== folderId) : [...prev, folderId],
@@ -1862,6 +1873,21 @@ function Extension() {
     const nextList = await mutateTemplateList(
       (currentList) =>
         currentList.map((t) => (t.id !== templateId ? t : inFolder ? withFolder(t, folderId) : withoutFolder(t, folderId))),
+      setFolderError,
+    );
+    if (nextList) setTemplates(nextList);
+  };
+
+  // Take a template out of every folder (back to the main page only).
+  const setTemplateMainPage = async (templateId: string): Promise<void> => {
+    setFolderError(null);
+    const nextList = await mutateTemplateList(
+      (currentList) =>
+        currentList.map((t) => {
+          if (t.id !== templateId) return t;
+          const { folderIds: _gone, ...rest } = t;
+          return rest;
+        }),
       setFolderError,
     );
     if (nextList) setTemplates(nextList);
@@ -3575,7 +3601,7 @@ function Extension() {
     return (
                     <s-table-row key={`folder-${folder.id}`} clickDelegate={toggleId}>
                       <s-table-cell>
-                        <s-clickable id={toggleId} onClick={() => toggleFolderOpen(folder.id)}>
+                        <s-clickable id={toggleId} onClick={() => handleFolderClick(folder.id)}>
                           <s-stack direction="inline" gap="small" alignItems="center">
                             <s-heading>{open ? '▼' : '▶'}</s-heading>
                             <s-heading>{folder.name}</s-heading>
@@ -3631,21 +3657,35 @@ function Extension() {
 
   // Every row of the template list as ONE flat array (a folder row, then its templates when it is open), so the rows
   // keep their order inside the table body.
-  const renderTemplateRows = () => {
+  // `signature` names the rows in order: the table is keyed by it, so any change to which rows are shown or in what
+  // order rebuilds the table from scratch (rows are never moved around inside a live table, which the admin's table
+  // does not always reorder correctly).
+  const renderTemplateRows = (): { rows: any[]; signature: string } => {
     const rows: any[] = [];
+    const ids: string[] = [];
+    const searching = templateSearch.trim() !== '';
     for (const item of templateGroups.items) {
       if (item.kind === 'template') {
         rows.push(renderTemplateRow(item.tpl, 0, 'main'));
+        ids.push(`main-${item.tpl.id}`);
         continue;
       }
-      const open = expandedFolderIds.includes(item.folder.id);
+      const open = searching || expandedFolderIds.includes(item.folder.id);
       rows.push(renderFolderRow(item.folder, open));
-      if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, 1, item.folder.id));
+      ids.push(`folder-${item.folder.id}-${open ? 'open' : 'closed'}`);
+      if (open) {
+        for (const tpl of item.list) {
+          rows.push(renderTemplateRow(tpl, 1, item.folder.id));
+          ids.push(`${item.folder.id}-${tpl.id}`);
+        }
+      }
     }
-    return rows;
+    return { rows, signature: ids.join('|') };
   };
 
-  const renderMainView = () => (
+  const renderMainView = () => {
+    const templateTable = renderTemplateRows();
+    return (
     <s-page heading="Template to File" inlineSize="large">
       <s-stack slot="header-actions" direction="inline" gap="base" justifyContent="space-between">
         {/* Being last in a single left-anchored stack only pushes Settings after the other
@@ -3956,13 +3996,13 @@ function Extension() {
             // Each row's clickDelegate is the clickable holding its name, so a click ANYWHERE on the row selects
             // the template (and two quick clicks open it); the table supplies the hover highlight. Pinned
             // templates are listed first and keep the blue actions button.
-            <s-table>
+            <s-table key={templateTable.signature}>
               <s-table-header-row>
                 <s-table-header listSlot="primary">Template</s-table-header>
                 <s-table-header listSlot="inline">Actions</s-table-header>
               </s-table-header-row>
               <s-table-body>
-                {renderTemplateRows()}
+                {templateTable.rows}
               </s-table-body>
             </s-table>
           )}
@@ -4001,27 +4041,47 @@ function Extension() {
         <s-stack gap="small">
           <s-text color="subdued">
             {movingTemplateId
-              ? `Choose the folders "${templates.find((t) => t.id === movingTemplateId)?.title || ''}" is in. It can be in several; with none it is in the main list.`
+              ? `Choose the folders "${templates.find((t) => t.id === movingTemplateId)?.title || ''}" is in. It can be on the main page or in any number of folders.`
               : ''}
           </s-text>
-          {templateFolders.length === 0 ? (
-            <s-text color="subdued">No folders yet. Use Add &gt; Add folder to create one.</s-text>
-          ) : (
-            templateFolders.map((folder: TemplateFolder) => {
-              const movingTemplate = templates.find((t) => t.id === movingTemplateId);
-              const inFolder = movingTemplate ? isInFolder(movingTemplate, folder.id) : false;
-              return (
+          {(() => {
+            const managed = templates.find((t) => t.id === movingTemplateId);
+            const onMainPage = managed ? isInMainList(managed, templateFolders) : false;
+            return (
+              <s-stack gap="small">
                 <s-checkbox
-                  key={folder.id}
-                  label={folder.name}
-                  checked={inFolder}
-                  onChange={() => {
-                    if (movingTemplateId) setTemplateInFolder(movingTemplateId, folder.id, !inFolder);
+                  label="Main page"
+                  checked={onMainPage}
+                  onChange={(e: any) => {
+                    // Ticking it takes the template out of every folder; it can't be unticked by itself (the template
+                    // has to be somewhere), tick a folder instead.
+                    if (!managed || !Boolean(e.currentTarget.checked) || onMainPage) return;
+                    setTemplateMainPage(managed.id);
                   }}
                 />
-              );
-            })
-          )}
+                {templateFolders.length === 0 ? (
+                  <s-text color="subdued">No folders yet. Use Add &gt; Add folder to create one.</s-text>
+                ) : (
+                  templateFolders.map((folder: TemplateFolder) => {
+                    const inFolder = managed ? isInFolder(managed, folder.id) : false;
+                    return (
+                      <s-checkbox
+                        key={folder.id}
+                        label={folder.name}
+                        checked={inFolder}
+                        onChange={(e: any) => {
+                          // The checkbox reports the state it now has; an echo of the state we already have is ignored.
+                          const want = Boolean(e.currentTarget.checked);
+                          if (!managed || want === inFolder) return;
+                          setTemplateInFolder(managed.id, folder.id, want);
+                        }}
+                      />
+                    );
+                  })
+                )}
+              </s-stack>
+            );
+          })()}
         </s-stack>
         <s-button slot="primary-action" variant="primary" commandFor="move-template-modal" command="--hide">
           Done
@@ -4138,7 +4198,8 @@ function Extension() {
         </s-button>
       </s-modal>
     </s-page>
-  );
+    );
+  };
 
   // History (session 17): a read-only combined product+note view, built the same way the Selection
   // view's own combined table is (combineSelectionRows/SelectionRow/productMatchesQuery/

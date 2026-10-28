@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { orderTemplateList, isInFolder, withFolder, withoutFolder } from '../../src/ui/template-list';
+import { orderTemplateList, isInFolder, isInMainList, withFolder, withoutFolder } from '../../src/ui/template-list';
 import type { TemplateData, TemplateFolder } from '../../src/domain/types';
 
 const t = (id: string, o: Partial<TemplateData> = {}): TemplateData => ({
@@ -26,9 +26,15 @@ describe('orderTemplateList', () => {
   it('a template whose folder is gone appears in the main list', () => {
     expect(label(orderTemplateList([t('a', { folderIds: ['GONE'] })], [], '', 'old-new'))).toEqual(['a']);
   });
-  it('a search shows one flat list of matches', () => {
-    const list = [t('apple', { folderIds: ['F1'] }), t('banana'), t('apricot', { pinned: true, pinnedAt: 1 })];
-    expect(label(orderTemplateList(list, folders, 'ap', 'a-z'))).toEqual(['apple', 'apricot'].sort());
+  it('a search shows folders holding a match (just the matches) before the matching main-list templates', () => {
+    const list = [t('apple', { folderIds: ['F1'] }), t('pear', { folderIds: ['F1'] }), t('banana'), t('apricot', { pinned: true, pinnedAt: 1 })];
+    expect(label(orderTemplateList(list, folders, 'ap', 'a-z'))).toEqual(['[F1:apple]', 'apricot']);
+  });
+  it('a search matching a folder name shows the folder with all its templates', () => {
+    const list = [t('apple', { folderIds: ['F2'] }), t('pear', { folderIds: ['F2'] }), t('plum')];
+    const named: TemplateFolder[] = [{ id: 'F1', name: 'Fruit' }, { id: 'F2', name: 'Orchard' }];
+    expect(label(orderTemplateList(list, named, 'orch', 'a-z'))).toEqual(['[F2:apple,pear]']);
+    expect(label(orderTemplateList(list, named, 'fruit', 'a-z'))).toEqual(['[F1:]']);
   });
   it('applies the chosen sort to unpinned templates', () => {
     const list = [t('b'), t('a'), t('c')];
@@ -45,6 +51,12 @@ describe('orderTemplateList', () => {
 });
 
 describe('folder membership helpers', () => {
+  it('a template is on the main page when it is in none of the existing folders', () => {
+    const fs: TemplateFolder[] = [{ id: 'F1', name: 'F1' }];
+    expect(isInMainList(t('a'), fs)).toBe(true);
+    expect(isInMainList(t('a', { folderIds: ['GONE'] }), fs)).toBe(true);
+    expect(isInMainList(t('a', { folderIds: ['F1'] }), fs)).toBe(false);
+  });
   it('adds without duplicating and removes only that folder', () => {
     const a = t('a');
     const one = withFolder(a, 'F1');

@@ -176,3 +176,10 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   list. Add selected / Remove selected / Manage only add or remove that folder's membership (nothing is stolen from other
   folders). Templates in an open folder have a vertical line on the left (one per nesting level, ready for nested folders),
   and a pinned folder's triple dots are black like a pinned template's.
+
+* **Folder fixes (unverified in a live admin):** template searches now include folders (a folder whose name matches shows all its
+  templates; a folder holding a match shows just the matches; every folder is open while searching). Manage lists "Main page"
+  first (ticking it removes the template from every folder) and applies the checkbox state each change event reports (the
+  earlier version flipped its own state, so an echoed event undid the change). The template table is keyed by its row list, so
+  any change to which rows show, or their order, rebuilds the table instead of moving live rows (the suspected cause of folder
+  contents appearing at the bottom). A quick double click on a folder opens it once.

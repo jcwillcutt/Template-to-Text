@@ -185,14 +185,14 @@ describe('template folders, move and copy', () => {
     expect(src).toContain("rowDomId('folder-toggle', folder.id)");
     expect(src).toContain('Rename folder');
     expect(src).toContain('Delete folder');
-    expect(src).toContain('if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, 1, item.folder.id));');
-    expect(src).toContain('{renderTemplateRows()}');
+    expect(src).toContain('rows.push(renderTemplateRow(tpl, 1, item.folder.id));');
+    expect(src).toContain('{templateTable.rows}');
     expect(src).toContain('borderWidth="none none none base"');
     expect(src).toContain('renderTemplateRow(tpl, 1, item.folder.id)');
   });
   it('the template menu has Move (a folder checklist; unchecking returns it to the main list) and Copy template', () => {
     expect(src).toContain('commandFor="move-template-modal"');
-    expect(src).toContain('setTemplateInFolder(movingTemplateId, folder.id, !inFolder)');
+    expect(src).toContain('setTemplateInFolder(managed.id, folder.id, want)');
     expect(src).toContain('Copy template');
     expect(src).toContain('const title = `${template.title} Copy`;');
     expect(src).toContain('folderIds: [...template.folderIds]');
@@ -270,5 +270,23 @@ describe('multi-folder templates and pinned folder menu', () => {
     expect(src).toContain("rowDomId(`template-select-${scope}`, tpl.id)");
     expect(src).toContain('key={`${scope}-${tpl.id}`}');
     expect(src).toContain('const menuId = `tpl-menu-${rowDomId(scope, tpl.id)}`;');
+  });
+});
+
+describe('folder fixes: Manage, table rebuild, folder clicks', () => {
+  it('Manage lists Main page first and applies the checkbox state the event reports', () => {
+    const modal = between('<s-modal id="move-template-modal"', '</s-modal>');
+    expect(modal.indexOf('label="Main page"')).toBeLessThan(modal.indexOf('label={folder.name}'));
+    expect(modal).toContain('setTemplateMainPage(managed.id)');
+    expect(modal).toContain('const want = Boolean(e.currentTarget.checked);');
+    expect(modal).toContain('if (!managed || want === inFolder) return;');
+  });
+  it('the template table is rebuilt whenever its rows change, and searches open every folder', () => {
+    expect(src).toContain('<s-table key={templateTable.signature}>');
+    expect(src).toContain("const open = searching || expandedFolderIds.includes(item.folder.id);");
+  });
+  it('a quick double click on a folder opens it once', () => {
+    const fn = between('const handleFolderClick', 'const toggleFolderOpen');
+    expect(fn).toContain('click.isDouble || (before !== null && click.next === before)');
   });
 });

@@ -3641,6 +3641,8 @@ function productMatchesQuery(product: ProductData, rawQuery: string): boolean {
   return matchesSearchQuery(product, rawQuery);
 }
 const isInFolder = (t: TemplateData, folderId: string): boolean => (t.folderIds || []).includes(folderId);
+const isInMainList = (t: TemplateData, folders: TemplateFolder[]): boolean =>
+  !folders.some((f) => isInFolder(t, f.id));
 function withFolder(t: TemplateData, folderId: string): TemplateData {
   return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId] };
 }
@@ -3674,7 +3676,26 @@ function orderTemplateList(
     return sorted;
   };
   const asTemplates = (list: TemplateData[]): TemplateListItem[] => list.map((tpl) => ({ kind: 'template', tpl }));
-  if (term) return asTemplates(applySelectedSort(matched));
+  if (term) {
+    const members = (folder: TemplateFolder, from: TemplateData[]): TemplateData[] => {
+      const inside = from.filter((t) => isInFolder(t, folder.id));
+      const pinned = inside.filter((t) => t.pinned === true).sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0));
+      return [...pinned, ...applySelectedSort(inside.filter((t) => t.pinned !== true))];
+    };
+    const folderItems: TemplateListItem[] = [];
+    const shown = new Set<string>();
+    for (const folder of folders) {
+      const nameHit = folder.name.toLowerCase().includes(term);
+      const list = members(folder, nameHit ? templates : matched);
+      if (!nameHit && list.length === 0) continue;
+      folderItems.push({ kind: 'folder', folder, list });
+      for (const t of list) shown.add(t.id);
+    }
+    const rest = matched.filter(
+      (t) => !shown.has(t.id) && !(t.folderIds || []).some((id) => folders.some((f) => f.id === id)),
+    );
+    return [...folderItems, ...asTemplates(applySelectedSort(rest))];
+  }
   const byPinTime = (a: { pinnedAt?: number | null }, b: { pinnedAt?: number | null }): number =>
     (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0);
   const folderIds = new Set(folders.map((f) => f.id));
@@ -5698,6 +5719,14 @@ function Extension() {
       setSaving(false);
     }
   };
+  const lastFolderClickRef = useRef<ClickRecord | null>(null);
+  const handleFolderClick = (folderId: string): void => {
+    const before = lastFolderClickRef.current;
+    const click = registerClick(before, folderId, Date.now());
+    lastFolderClickRef.current = click.next;
+    if (click.isDouble || (before !== null && click.next === before)) return;
+    toggleFolderOpen(folderId);
+  };
   const toggleFolderOpen = (folderId: string): void => {
     setExpandedFolderIds((prev: string[]) =>
       prev.includes(folderId) ? prev.filter((id: string) => id !== folderId) : [...prev, folderId],
@@ -5750,6 +5779,19 @@ function Extension() {
     const nextList = await mutateTemplateList(
       (currentList) =>
         currentList.map((t) => (t.id !== templateId ? t : inFolder ? withFolder(t, folderId) : withoutFolder(t, folderId))),
+      setFolderError,
+    );
+    if (nextList) setTemplates(nextList);
+  };
+  const setTemplateMainPage = async (templateId: string): Promise<void> => {
+    setFolderError(null);
+    const nextList = await mutateTemplateList(
+      (currentList) =>
+        currentList.map((t) => {
+          if (t.id !== templateId) return t;
+          const { folderIds: _gone, ...rest } = t;
+          return rest;
+        }),
       setFolderError,
     );
     if (nextList) setTemplates(nextList);
@@ -7172,7 +7214,7 @@ function Extension() {
     return (
                     <s-table-row key={`folder-${folder.id}`} clickDelegate={toggleId}>
                       <s-table-cell>
-                        <s-clickable id={toggleId} onClick={() => toggleFolderOpen(folder.id)}>
+                        <s-clickable id={toggleId} onClick={() => handleFolderClick(folder.id)}>
                           <s-stack direction="inline" gap="small" alignItems="center">
                             <s-heading>{open ? '▼' : '▶'}</s-heading>
                             <s-heading>{folder.name}</s-heading>
@@ -7225,20 +7267,31 @@ function Extension() {
                     </s-table-row>
     );
   };
-  const renderTemplateRows = () => {
+  const renderTemplateRows = (): { rows: any[]; signature: string } => {
     const rows: any[] = [];
+    const ids: string[] = [];
+    const searching = templateSearch.trim() !== '';
     for (const item of templateGroups.items) {
       if (item.kind === 'template') {
         rows.push(renderTemplateRow(item.tpl, 0, 'main'));
+        ids.push(`main-${item.tpl.id}`);
         continue;
       }
-      const open = expandedFolderIds.includes(item.folder.id);
+      const open = searching || expandedFolderIds.includes(item.folder.id);
       rows.push(renderFolderRow(item.folder, open));
-      if (open) for (const tpl of item.list) rows.push(renderTemplateRow(tpl, 1, item.folder.id));
+      ids.push(`folder-${item.folder.id}-${open ? 'open' : 'closed'}`);
+      if (open) {
+        for (const tpl of item.list) {
+          rows.push(renderTemplateRow(tpl, 1, item.folder.id));
+          ids.push(`${item.folder.id}-${tpl.id}`);
+        }
+      }
     }
-    return rows;
+    return { rows, signature: ids.join('|') };
   };
-  const renderMainView = () => (
+  const renderMainView = () => {
+    const templateTable = renderTemplateRows();
+    return (
     <s-page heading="Template to File" inlineSize="large">
       <s-stack slot="header-actions" direction="inline" gap="base" justifyContent="space-between">
         
@@ -7536,13 +7589,13 @@ function Extension() {
               </s-text>
             </s-box>
           ) : (
-            <s-table>
+            <s-table key={templateTable.signature}>
               <s-table-header-row>
                 <s-table-header listSlot="primary">Template</s-table-header>
                 <s-table-header listSlot="inline">Actions</s-table-header>
               </s-table-header-row>
               <s-table-body>
-                {renderTemplateRows()}
+                {templateTable.rows}
               </s-table-body>
             </s-table>
           )}
@@ -7581,27 +7634,44 @@ function Extension() {
         <s-stack gap="small">
           <s-text color="subdued">
             {movingTemplateId
-              ? `Choose the folders "${templates.find((t) => t.id === movingTemplateId)?.title || ''}" is in. It can be in several; with none it is in the main list.`
+              ? `Choose the folders "${templates.find((t) => t.id === movingTemplateId)?.title || ''}" is in. It can be on the main page or in any number of folders.`
               : ''}
           </s-text>
-          {templateFolders.length === 0 ? (
-            <s-text color="subdued">No folders yet. Use Add &gt; Add folder to create one.</s-text>
-          ) : (
-            templateFolders.map((folder: TemplateFolder) => {
-              const movingTemplate = templates.find((t) => t.id === movingTemplateId);
-              const inFolder = movingTemplate ? isInFolder(movingTemplate, folder.id) : false;
-              return (
+          {(() => {
+            const managed = templates.find((t) => t.id === movingTemplateId);
+            const onMainPage = managed ? isInMainList(managed, templateFolders) : false;
+            return (
+              <s-stack gap="small">
                 <s-checkbox
-                  key={folder.id}
-                  label={folder.name}
-                  checked={inFolder}
-                  onChange={() => {
-                    if (movingTemplateId) setTemplateInFolder(movingTemplateId, folder.id, !inFolder);
+                  label="Main page"
+                  checked={onMainPage}
+                  onChange={(e: any) => {
+                    if (!managed || !Boolean(e.currentTarget.checked) || onMainPage) return;
+                    setTemplateMainPage(managed.id);
                   }}
                 />
-              );
-            })
-          )}
+                {templateFolders.length === 0 ? (
+                  <s-text color="subdued">No folders yet. Use Add &gt; Add folder to create one.</s-text>
+                ) : (
+                  templateFolders.map((folder: TemplateFolder) => {
+                    const inFolder = managed ? isInFolder(managed, folder.id) : false;
+                    return (
+                      <s-checkbox
+                        key={folder.id}
+                        label={folder.name}
+                        checked={inFolder}
+                        onChange={(e: any) => {
+                          const want = Boolean(e.currentTarget.checked);
+                          if (!managed || want === inFolder) return;
+                          setTemplateInFolder(managed.id, folder.id, want);
+                        }}
+                      />
+                    );
+                  })
+                )}
+              </s-stack>
+            );
+          })()}
         </s-stack>
         <s-button slot="primary-action" variant="primary" commandFor="move-template-modal" command="--hide">
           Done
@@ -7709,7 +7779,8 @@ function Extension() {
         </s-button>
       </s-modal>
     </s-page>
-  );
+    );
+  };
   const historyLogNotes = useMemo<SelectionEntry[]>(
     () => historyEntries.filter((e: SelectionEntry) => isStandaloneNote(e)),
     [historyEntries],

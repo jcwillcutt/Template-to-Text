@@ -5,6 +5,10 @@ import { sanitizeExtension } from '../format/helpers';
 // Folder membership: a template can be in any number of folders.
 export const isInFolder = (t: TemplateData, folderId: string): boolean => (t.folderIds || []).includes(folderId);
 
+// Whether a template is in the main list: in none of the folders that exist.
+export const isInMainList = (t: TemplateData, folders: TemplateFolder[]): boolean =>
+  !folders.some((f) => isInFolder(t, f.id));
+
 export function withFolder(t: TemplateData, folderId: string): TemplateData {
   return isInFolder(t, folderId) ? t : { ...t, folderIds: [...(t.folderIds || []), folderId] };
 }
@@ -47,7 +51,28 @@ export function orderTemplateList(
     return sorted;
   };
   const asTemplates = (list: TemplateData[]): TemplateListItem[] => list.map((tpl) => ({ kind: 'template', tpl }));
-  if (term) return asTemplates(applySelectedSort(matched));
+  if (term) {
+    // A search shows every folder whose name matches (with all its templates) and every folder holding a matching
+    // template (with just those); a matching template in no folder is listed on its own after them.
+    const members = (folder: TemplateFolder, from: TemplateData[]): TemplateData[] => {
+      const inside = from.filter((t) => isInFolder(t, folder.id));
+      const pinned = inside.filter((t) => t.pinned === true).sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0));
+      return [...pinned, ...applySelectedSort(inside.filter((t) => t.pinned !== true))];
+    };
+    const folderItems: TemplateListItem[] = [];
+    const shown = new Set<string>();
+    for (const folder of folders) {
+      const nameHit = folder.name.toLowerCase().includes(term);
+      const list = members(folder, nameHit ? templates : matched);
+      if (!nameHit && list.length === 0) continue;
+      folderItems.push({ kind: 'folder', folder, list });
+      for (const t of list) shown.add(t.id);
+    }
+    const rest = matched.filter(
+      (t) => !shown.has(t.id) && !(t.folderIds || []).some((id) => folders.some((f) => f.id === id)),
+    );
+    return [...folderItems, ...asTemplates(applySelectedSort(rest))];
+  }
 
   const byPinTime = (a: { pinnedAt?: number | null }, b: { pinnedAt?: number | null }): number =>
     (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0);
