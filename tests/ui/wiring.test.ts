@@ -291,3 +291,11 @@ describe('folder fixes: Manage, table rebuild, folder clicks', () => {
     expect(fn).toContain('click.isDouble || (before !== null && click.next === before)');
   });
 });
+
+describe('Download Settings persistence', () => {
+  it('is read from extension storage on start and written whenever it changes', () => {
+    expect(src).toContain('parseDownloadMode(await shopify.storage.get(DOWNLOAD_MODE_KEY))');
+    expect(src).toContain('shopify.storage.set(DOWNLOAD_MODE_KEY, mode)');
+    expect(src).toContain('chooseDownloadMode(value)');
+  });
+});

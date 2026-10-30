@@ -153,7 +153,7 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
   chooses "Group downloads by Template" (default; `multiple-templates-<date time>.zip` holding each template's usual
   files/folder) or "Alternate Templates Every Selection" (numbered files, product 1 template 1, product 1 template 2, ...;
   templates of different file-break types go in `<type>-<date time>/` subfolders). Logic: `src/engine/multi.ts`, tests in
-  `tests/engine/multi-template.test.ts`. The choice is kept for the session only. The Selection view lost its remove-X
+  `tests/engine/multi-template.test.ts`.  The Selection view lost its remove-X
   buttons, "Clear Selection" became "Clear Selected", checkboxes/Select All appear on the Current Selection too, and a
   Reorder button (black when on) shows/hides the arrows.
 
@@ -187,3 +187,5 @@ Metaobjects always require a **definition** (a schema), so a metaobject can't be
 * **Main page plus folders:** a template can be on the main page and in folders at once (`onMain`, stored only for a template that is in
   folders). Adding a template to a folder keeps it on the main page too (untick "Main page" in Manage to move it); taking it out of its
   last folder puts it back; Main page can't be unticked while the template is in no folder.
+
+* **Download Settings now persist:** the packaging choice is saved to the extension's storage (`download_mode`) when changed and read on start.

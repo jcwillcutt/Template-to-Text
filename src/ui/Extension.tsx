@@ -821,6 +821,11 @@ function Extension() {
 
   useEffect(() => {
     const init = async (): Promise<void> => {
+      try {
+        setDownloadMode(parseDownloadMode(await shopify.storage.get(DOWNLOAD_MODE_KEY)));
+      } catch {
+        // No saved setting: the default (group by template) stays.
+      }
       let saved: ViewState | null = null;
       try {
         saved = parseViewState(await shopify.storage.get(VIEW_STATE_KEY));
@@ -1814,6 +1819,17 @@ function Extension() {
     // The second click of a quick pair, or the same physical click delivered twice, does nothing.
     if (click.isDouble || (before !== null && click.next === before)) return;
     toggleFolderOpen(folderId);
+  };
+
+  // Change how multi-template downloads are packaged, and remember it for next time.
+  const chooseDownloadMode = (mode: MultiDownloadMode): void => {
+    setDownloadMode(mode);
+    try {
+      const written = shopify.storage.set(DOWNLOAD_MODE_KEY, mode);
+      if (written && typeof written.catch === 'function') written.catch(() => undefined);
+    } catch {
+      // Storage unavailable: the choice lasts for this session only.
+    }
   };
 
   const toggleFolderOpen = (folderId: string): void => {
@@ -4370,7 +4386,7 @@ function Extension() {
             name="download-mode"
             onChange={(e: any) => {
               const value = (e.currentTarget?.values ?? e.target?.values ?? [])[0];
-              if (value === 'grouped' || value === 'alternate') setDownloadMode(value);
+              if (value === 'grouped' || value === 'alternate') chooseDownloadMode(value);
             }}
           >
             <s-choice value="grouped" selected={downloadMode === 'grouped'}>

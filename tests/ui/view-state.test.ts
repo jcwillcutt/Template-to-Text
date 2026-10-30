@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildViewState, parseViewState } from '../../src/ui/view-state';
+import { buildViewState, parseViewState, parseDownloadMode } from '../../src/ui/view-state';
 import { formatSelectedSummary } from '../../src/format/helpers';
 
 describe('view state', () => {
@@ -34,5 +34,14 @@ describe('formatSelectedSummary', () => {
     expect(formatSelectedSummary(3, 0, 2)).toBe('(3|2)');
     expect(formatSelectedSummary(0, 0, 0)).toBe('(0|0)');
     expect(formatSelectedSummary(3, 2, 1)).toBe('(3/2|1)');
+  });
+});
+
+describe('download mode setting', () => {
+  it('reads a saved choice and falls back to grouping by template', () => {
+    expect(parseDownloadMode('alternate')).toBe('alternate');
+    expect(parseDownloadMode('grouped')).toBe('grouped');
+    expect(parseDownloadMode(undefined)).toBe('grouped');
+    expect(parseDownloadMode(42)).toBe('grouped');
   });
 });

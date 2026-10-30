@@ -3735,6 +3735,10 @@ interface ViewState {
   expandedFolderIds: string[];
 }
 const VIEW_STATE_KEY = 'view_state';
+const DOWNLOAD_MODE_KEY = 'download_mode';
+function parseDownloadMode(raw: unknown): 'grouped' | 'alternate' {
+  return raw === 'alternate' ? 'alternate' : 'grouped';
+}
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
 const record = (value: unknown): Record<string, unknown> =>
@@ -4934,6 +4938,10 @@ function Extension() {
   const [viewStateLoaded, setViewStateLoaded] = useState<boolean>(false);
   useEffect(() => {
     const init = async (): Promise<void> => {
+      try {
+        setDownloadMode(parseDownloadMode(await shopify.storage.get(DOWNLOAD_MODE_KEY)));
+      } catch {
+      }
       let saved: ViewState | null = null;
       try {
         saved = parseViewState(await shopify.storage.get(VIEW_STATE_KEY));
@@ -5735,6 +5743,14 @@ function Extension() {
     lastFolderClickRef.current = click.next;
     if (click.isDouble || (before !== null && click.next === before)) return;
     toggleFolderOpen(folderId);
+  };
+  const chooseDownloadMode = (mode: MultiDownloadMode): void => {
+    setDownloadMode(mode);
+    try {
+      const written = shopify.storage.set(DOWNLOAD_MODE_KEY, mode);
+      if (written && typeof written.catch === 'function') written.catch(() => undefined);
+    } catch {
+    }
   };
   const toggleFolderOpen = (folderId: string): void => {
     setExpandedFolderIds((prev: string[]) =>
@@ -7940,7 +7956,7 @@ function Extension() {
             name="download-mode"
             onChange={(e: any) => {
               const value = (e.currentTarget?.values ?? e.target?.values ?? [])[0];
-              if (value === 'grouped' || value === 'alternate') setDownloadMode(value);
+              if (value === 'grouped' || value === 'alternate') chooseDownloadMode(value);
             }}
           >
             <s-choice value="grouped" selected={downloadMode === 'grouped'}>

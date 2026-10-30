@@ -17,6 +17,14 @@ export interface ViewState {
 
 export const VIEW_STATE_KEY = 'view_state';
 
+// Settings > Download Settings: how a download of several templates is packaged. Kept in its own storage key so it
+// survives independently of the page state.
+export const DOWNLOAD_MODE_KEY = 'download_mode';
+
+export function parseDownloadMode(raw: unknown): 'grouped' | 'alternate' {
+  return raw === 'alternate' ? 'alternate' : 'grouped';
+}
+
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [];
 
